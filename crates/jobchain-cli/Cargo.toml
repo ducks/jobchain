@@ -1,0 +1,14 @@
+[package]
+name = "jobchain-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI for jobchain"
+
+[[bin]]
+name = "jobchain"
+path = "src/main.rs"
+
+[dependencies]
+jobchain-core = { path = "../jobchain-core" }

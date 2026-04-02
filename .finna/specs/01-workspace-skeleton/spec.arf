@@ -7,3 +7,4 @@ Key decisions:
 - **Edition 2024** with a fallback to 2021 if rustc is too old
 - **cli crate produces a binary named `jobchain`**, not `jobchain-cli`
 - Both `jobchain-cli` and `jobchain-verify` depend on `jobchain-core` via path; verify does *not* depend on cli
+outcome = "success"
