@@ -7,3 +7,4 @@ Key decisions in the spec:
 - **`opt-level=s`** for the wasm32 target to keep the binary small (<200KB target)
 - **CI gate** — `cargo check --target wasm32-unknown-unknown` catches regressions without needing wasm-pack in CI
 - Backup covers ed25519-dalek C dependency issues, wasm-pack alternatives, and binary size debugging with twiggy
+outcome = "success"

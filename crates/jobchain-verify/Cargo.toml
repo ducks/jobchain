@@ -10,7 +10,7 @@ description = "Signature and credential verification for jobchain"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:getrandom"]
 
 [dependencies]
 jobchain-core = { path = "../jobchain-core", default-features = false }
@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 wasm-bindgen = { version = "0.2", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
+getrandom = { version = "0.2", optional = true, features = ["js"] }
 
 [dev-dependencies]
 jobl = { workspace = true }
