@@ -93,7 +93,7 @@ pub enum CredentialError {
 }
 
 /// Recursively sort all object keys for deterministic JSON canonicalization.
-fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
             let sorted: BTreeMap<String, serde_json::Value> = map

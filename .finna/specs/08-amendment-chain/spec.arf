@@ -8,3 +8,4 @@ Spec written to `.finna/specs/08-amendment-chain.toml`. Key design decisions:
 - **Chain verification separate from signature verification** — `verify_link`/`verify_chain` check hash integrity, jobchain-verify handles Ed25519; orthogonal concerns
 - **Unsigned predecessors rejected** — you can't link to a document whose hash would change after signing
 - **`canonicalize()` shared** from credential.rs (made `pub(crate)`) to guarantee identical serialization for hashing and signing
+outcome = "success"
