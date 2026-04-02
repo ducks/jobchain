@@ -101,23 +101,14 @@ impl Keypair {
         Ok(())
     }
 
-    /// Access the underlying signing key (for signing operations in later steps).
-    pub fn signing_key(&self) -> &SigningKey {
-        &self.signing_key
-    }
-
-    /// Sign a message and return the raw 64-byte signature.
+    /// Sign a message, returning the 64-byte Ed25519 signature.
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
         let sig = self.signing_key.sign(message);
         sig.to_bytes().to_vec()
     }
 
-    /// Verify a signature against a message using this keypair's public key.
-    pub fn verify(
-        &self,
-        message: &[u8],
-        signature: &[u8],
-    ) -> Result<(), SigningError> {
+    /// Verify a 64-byte Ed25519 signature against a message.
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), SigningError> {
         let sig_bytes: [u8; 64] = signature.try_into().map_err(|_| {
             SigningError::InvalidKey(format!(
                 "expected 64-byte signature, got {} bytes",
@@ -129,6 +120,11 @@ impl Keypair {
             .verifying_key()
             .verify_strict(message, &sig)
             .map_err(|e| SigningError::Signing(e.to_string()))
+    }
+
+    /// Access the underlying signing key (for signing operations in later steps).
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
     }
 }
 
@@ -194,12 +190,10 @@ mod tests {
         let kp = Keypair::generate().unwrap();
         let mb = kp.public_key_multibase();
 
-        // Must start with 'z' (base58btc multibase prefix)
         assert!(mb.starts_with('z'));
 
-        // Decode and verify round-trip
         let decoded = bs58::decode(&mb[1..]).into_vec().unwrap();
-        assert_eq!(decoded.len(), 34); // 2-byte header + 32-byte key
+        assert_eq!(decoded.len(), 34);
         assert_eq!(decoded[0], 0xed);
         assert_eq!(decoded[1], 0x01);
         assert_eq!(&decoded[2..], &kp.public_key_bytes());

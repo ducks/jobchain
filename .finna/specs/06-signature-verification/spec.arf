@@ -6,3 +6,4 @@ Written to `.finna/specs/06-signature-verification.toml`. The spec covers:
 - **Minimal dependencies**: no rand, no chrono — verify crate stays lightweight for WASM compilation
 - **12 test cases** covering valid credentials, tampered fields, wrong keys, bad proof formats, issuer mismatches, and multibase key roundtrips
 - **Fallback plan** for `verify_strict` interop issues and cross-crate canonicalization sharing
+outcome = "success"

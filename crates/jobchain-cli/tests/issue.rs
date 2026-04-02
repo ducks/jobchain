@@ -2,223 +2,290 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-fn jobchain() -> Command {
+fn cmd() -> Command {
     Command::cargo_bin("jobchain").unwrap()
 }
 
 fn sample_experience_json() -> &'static str {
     r#"{
-        "title": "Software Engineer",
-        "company": "Discourse",
-        "location": "Remote",
-        "start": "2022-01-15",
-        "summary": "Infrastructure team",
-        "technologies": ["Ruby", "JavaScript"],
-        "highlights": ["Built deployment pipeline"]
-    }"#
+  "title": "Infrastructure Engineer",
+  "company": "Discourse",
+  "start": "2024-03",
+  "technologies": ["Ruby", "JavaScript", "Docker"],
+  "highlights": ["Led migration to containerized deployment"]
+}"#
 }
 
-/// Initialize a keypair in the given directory, returning the domain dir path.
-fn init_identity(tmp: &TempDir, domain: &str) -> std::path::PathBuf {
-    let dir = tmp.path().join(domain);
-    jobchain()
-        .args(["init", "--domain", domain, "--output-dir"])
-        .arg(dir.as_os_str())
+/// Run `jobchain init` in a tempdir and return the tempdir.
+fn init_keypair(tmp: &TempDir, domain: &str) {
+    cmd()
+        .args([
+            "init",
+            "--org",
+            "TestCorp",
+            "--domain",
+            domain,
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
         .assert()
         .success();
-    dir
 }
 
 #[test]
-fn issue_from_file_input() {
+fn test_issue_from_file() {
     let tmp = TempDir::new().unwrap();
-    let key_dir = init_identity(&tmp, "example.com");
+    init_keypair(&tmp, "example.com");
 
     let input_file = tmp.path().join("experience.json");
     std::fs::write(&input_file, sample_experience_json()).unwrap();
 
-    jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(key_dir.as_os_str())
-        .arg("--input")
-        .arg(input_file.as_os_str())
-        .arg("--date")
-        .arg("2025-06-01T00:00:00Z")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("VerifiableCredential"))
-        .stdout(predicate::str::contains("did:web:example.com"))
-        .stdout(predicate::str::contains("2025-06-01T00:00:00Z"));
-}
-
-#[test]
-fn issue_from_stdin_pipe() {
-    let tmp = TempDir::new().unwrap();
-    let key_dir = init_identity(&tmp, "example.com");
-
-    jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(key_dir.as_os_str())
-        .arg("--date")
-        .arg("2025-06-01T00:00:00Z")
-        .write_stdin(sample_experience_json())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("VerifiableCredential"));
-}
-
-#[test]
-fn issue_with_custom_date() {
-    let tmp = TempDir::new().unwrap();
-    let key_dir = init_identity(&tmp, "example.com");
-
-    let input_file = tmp.path().join("experience.json");
-    std::fs::write(&input_file, sample_experience_json()).unwrap();
-
-    let output = jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(key_dir.as_os_str())
-        .arg("--input")
-        .arg(input_file.as_os_str())
-        .arg("--date")
-        .arg("2024-12-25T12:00:00Z")
-        .output()
-        .unwrap();
-
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let vc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(vc["issuanceDate"], "2024-12-25T12:00:00Z");
-}
-
-#[test]
-fn issue_default_date_is_now() {
-    let tmp = TempDir::new().unwrap();
-    let key_dir = init_identity(&tmp, "example.com");
-
-    let input_file = tmp.path().join("experience.json");
-    std::fs::write(&input_file, sample_experience_json()).unwrap();
-
-    let output = jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(key_dir.as_os_str())
-        .arg("--input")
-        .arg(input_file.as_os_str())
-        .output()
-        .unwrap();
-
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let vc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let date = vc["issuanceDate"].as_str().unwrap();
-    // Should be a valid RFC 3339 date from today
-    assert!(date.starts_with(&chrono::Utc::now().format("%Y").to_string()));
-}
-
-#[test]
-fn issue_output_to_file() {
-    let tmp = TempDir::new().unwrap();
-    let key_dir = init_identity(&tmp, "example.com");
-
-    let input_file = tmp.path().join("experience.json");
-    std::fs::write(&input_file, sample_experience_json()).unwrap();
-
-    let output_file = tmp.path().join("credential.json");
-
-    jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(key_dir.as_os_str())
-        .arg("--input")
-        .arg(input_file.as_os_str())
-        .arg("--output")
-        .arg(output_file.as_os_str())
-        .arg("--date")
-        .arg("2025-06-01T00:00:00Z")
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Credential written to"));
-
-    let contents = std::fs::read_to_string(&output_file).unwrap();
-    let vc: serde_json::Value = serde_json::from_str(&contents).unwrap();
-    assert_eq!(vc["issuer"], "did:web:example.com");
-}
-
-#[test]
-fn issue_missing_keypair() {
-    let tmp = TempDir::new().unwrap();
-    let nonexistent = tmp.path().join("nope");
-
-    let input_file = tmp.path().join("experience.json");
-    std::fs::write(&input_file, sample_experience_json()).unwrap();
-
-    jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(nonexistent.as_os_str())
-        .arg("--input")
-        .arg(input_file.as_os_str())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("keypair not found"));
-}
-
-#[test]
-fn issue_invalid_json() {
-    let tmp = TempDir::new().unwrap();
-    let key_dir = init_identity(&tmp, "example.com");
-
-    let input_file = tmp.path().join("bad.json");
-    std::fs::write(&input_file, "not json at all").unwrap();
-
-    jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(key_dir.as_os_str())
-        .arg("--input")
-        .arg(input_file.as_os_str())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("failed to parse ExperienceItem JSON"));
-}
-
-#[test]
-fn issue_sign_then_verify_roundtrip() {
-    let tmp = TempDir::new().unwrap();
-    let key_dir = init_identity(&tmp, "example.com");
-
-    let input_file = tmp.path().join("experience.json");
-    std::fs::write(&input_file, sample_experience_json()).unwrap();
-
-    let output = jobchain()
-        .args(["issue", "--domain", "example.com", "--key-dir"])
-        .arg(key_dir.as_os_str())
-        .arg("--input")
-        .arg(input_file.as_os_str())
-        .arg("--date")
-        .arg("2025-06-01T00:00:00Z")
+    let output = cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--input",
+            input_file.to_str().unwrap(),
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let vc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
-    // Extract the proof value and verify the signature manually
+    let vc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(vc["issuer"], "did:web:example.com");
+    assert_eq!(vc["type"][0], "VerifiableCredential");
+    assert_eq!(vc["type"][1], "EmploymentCredential");
+    assert_eq!(vc["credentialSubject"]["company"], "Discourse");
+    assert_eq!(vc["credentialSubject"]["title"], "Infrastructure Engineer");
+
+    let proof = &vc["proof"];
+    assert_eq!(proof["type"], "Ed25519Signature2020");
+    assert_eq!(proof["verificationMethod"], "did:web:example.com#key-1");
+    assert!(proof["proofValue"].as_str().unwrap().starts_with('z'));
+}
+
+#[test]
+fn test_issue_from_stdin() {
+    let tmp = TempDir::new().unwrap();
+    init_keypair(&tmp, "example.com");
+
+    let output = cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .write_stdin(sample_experience_json())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let vc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(vc["issuer"], "did:web:example.com");
+    assert_eq!(vc["credentialSubject"]["company"], "Discourse");
+    assert!(vc["proof"]["proofValue"].as_str().unwrap().starts_with('z'));
+}
+
+#[test]
+fn test_issue_custom_date() {
+    let tmp = TempDir::new().unwrap();
+    init_keypair(&tmp, "example.com");
+
+    let input_file = tmp.path().join("exp.json");
+    std::fs::write(&input_file, sample_experience_json()).unwrap();
+
+    let output = cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--input",
+            input_file.to_str().unwrap(),
+            "--date",
+            "2024-06-01",
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let vc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(vc["issuanceDate"], "2024-06-01");
+}
+
+#[test]
+fn test_issue_default_date() {
+    let tmp = TempDir::new().unwrap();
+    init_keypair(&tmp, "example.com");
+
+    let input_file = tmp.path().join("exp.json");
+    std::fs::write(&input_file, sample_experience_json()).unwrap();
+
+    let output = cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--input",
+            input_file.to_str().unwrap(),
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let vc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    assert_eq!(vc["issuanceDate"].as_str().unwrap(), today);
+}
+
+#[test]
+fn test_issue_output_to_file() {
+    let tmp = TempDir::new().unwrap();
+    init_keypair(&tmp, "example.com");
+
+    let input_file = tmp.path().join("exp.json");
+    std::fs::write(&input_file, sample_experience_json()).unwrap();
+
+    let output_file = tmp.path().join("cred.json");
+
+    cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--input",
+            input_file.to_str().unwrap(),
+            "--output",
+            output_file.to_str().unwrap(),
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Credential written to"));
+
+    assert!(output_file.exists());
+
+    let content = std::fs::read_to_string(&output_file).unwrap();
+    let vc: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(vc["issuer"], "did:web:example.com");
+    assert!(vc["proof"].is_object());
+}
+
+#[test]
+fn test_issue_missing_keypair() {
+    let tmp = TempDir::new().unwrap();
+
+    let input_file = tmp.path().join("exp.json");
+    std::fs::write(&input_file, sample_experience_json()).unwrap();
+
+    cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--input",
+            input_file.to_str().unwrap(),
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No keypair found"))
+        .stderr(predicate::str::contains("jobchain init"));
+}
+
+#[test]
+fn test_issue_invalid_json() {
+    let tmp = TempDir::new().unwrap();
+    init_keypair(&tmp, "example.com");
+
+    cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .write_stdin("not valid json {{{")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to parse"));
+}
+
+#[test]
+fn test_issue_roundtrip_verifiable() {
+    let tmp = TempDir::new().unwrap();
+    init_keypair(&tmp, "example.com");
+
+    let input_file = tmp.path().join("exp.json");
+    std::fs::write(&input_file, sample_experience_json()).unwrap();
+
+    // Issue a credential
+    let output = cmd()
+        .args([
+            "issue",
+            "--domain",
+            "example.com",
+            "--input",
+            input_file.to_str().unwrap(),
+            "--key-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let vc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    // Extract proof and reconstruct signing payload (proof-stripped, canonicalized)
     let proof_value = vc["proof"]["proofValue"].as_str().unwrap();
-    assert!(proof_value.starts_with("z"), "proof value should be multibase z-encoded");
-
-    // Decode the signature from multibase z-base58btc
     let sig_bytes = bs58::decode(&proof_value[1..]).into_vec().unwrap();
-    assert_eq!(sig_bytes.len(), 64, "Ed25519 signature should be 64 bytes");
+    assert_eq!(sig_bytes.len(), 64);
+
+    // Build the signing payload: remove proof, sort keys, compact JSON
+    let mut payload_value = vc.clone();
+    payload_value.as_object_mut().unwrap().remove("proof");
+    let canonical = canonicalize(&payload_value);
+    let payload = serde_json::to_vec(&canonical).unwrap();
 
     // Load the public key and verify
-    let pub_key_bytes = std::fs::read(key_dir.join("public.key")).unwrap();
-    let pub_key = ed25519_dalek::VerifyingKey::from_bytes(
-        &pub_key_bytes.try_into().expect("32-byte public key"),
-    )
-    .unwrap();
+    let pk_bytes = std::fs::read(tmp.path().join("example.com/public.key")).unwrap();
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap()).unwrap();
 
-    // Reconstruct the signing payload (VC without proof)
-    let mut vc_no_proof = vc.clone();
-    vc_no_proof.as_object_mut().unwrap().remove("proof");
-    let payload = serde_json::to_vec(&vc_no_proof).unwrap();
+    use ed25519_dalek::Verifier;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes.try_into().unwrap());
+    verifying_key.verify(&payload, &signature).unwrap();
+}
 
-    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes.try_into().expect("64-byte sig"));
-    pub_key.verify_strict(&payload, &sig).expect("signature should verify");
+/// Recursively sort all object keys (same as core's canonicalize).
+fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: std::collections::BTreeMap<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), canonicalize(v)))
+                .collect();
+            serde_json::to_value(sorted).unwrap()
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(canonicalize).collect())
+        }
+        other => other.clone(),
+    }
 }

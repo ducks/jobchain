@@ -6,3 +6,4 @@ Written to `.finna/specs/09-adapter-trait.toml`. Key design decisions:
 - **`DepartureData` is distinct from `TitleChangeData`** because departures always set an `end` date and signal credential finality, which downstream consumers may treat differently
 - **Thin `into_*` conversion methods** on each data struct bridge to `VerifiableCredential::new()` and `Amendment::from_credential()` without either layer knowing the other's internals
 - **`AdapterError`** with `MissingField`, `InvalidData`, `SourceUnavailable` variants gives callers structured errors to match on
+outcome = "success"

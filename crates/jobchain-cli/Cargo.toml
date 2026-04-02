@@ -11,7 +11,8 @@ name = "jobchain"
 path = "src/main.rs"
 
 [dependencies]
-jobchain-core = { path = "../jobchain-core" }
+jobchain-core = { path = "../jobchain-core", features = ["resolve"] }
+jobchain-verify = { path = "../jobchain-verify" }
 clap = { workspace = true }
 dirs = { workspace = true }
 anyhow = { workspace = true }
@@ -25,3 +26,6 @@ predicates = { workspace = true }
 tempfile = "3"
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+serde_json = { workspace = true }
