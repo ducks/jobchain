@@ -7,3 +7,4 @@ Key design decisions in this spec:
 - **`domain_to_did` handles the full did:web spec** — ports get `%3A`-encoded, paths become colon-separated segments.
 - **bs58 crate** for base58btc — standard Rust choice, with a manual fallback in the backup plan.
 - **Pretty JSON output** — since `did.json` is a file humans host and inspect at `.well-known/did.json`.
+outcome = "success"
