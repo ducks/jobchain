@@ -7,3 +7,4 @@ The spec covers:
 - **Chain depth**: two-amendment chain with wallet validation
 - **Edge cases**: stdin piping, empty wallet dir, force-overwrite guard
 - **Isolation**: all tests use `tempfile::TempDir` and explicit `--key-dir` — no network, no WASM requirement, no `~/.jobchain/` side effects
+outcome = "success"
