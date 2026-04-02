@@ -1,41 +1,69 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{bail, Context};
+use anyhow::{bail, Context, Result};
+use clap::Args;
+
 use jobchain_core::did::{did_document_to_json, generate_did_document};
 use jobchain_core::signing::Keypair;
 
-fn default_dir() -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".jobchain"))
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Organization name (e.g., "Discourse")
+    #[arg(long)]
+    pub org: String,
+
+    /// Domain for did:web resolution (e.g., "discourse.org")
+    #[arg(long)]
+    pub domain: String,
+
+    /// Write DID document to this file instead of stdout
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Overwrite existing keypair for this domain
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+
+    /// Override the default key directory (~/.jobchain/)
+    #[arg(long)]
+    pub key_dir: Option<PathBuf>,
 }
 
-pub fn run(domain: &str, output_dir: Option<&str>, force: bool) -> anyhow::Result<()> {
-    let dir = match output_dir {
-        Some(p) => PathBuf::from(p),
-        None => default_dir()?,
+pub fn run(args: InitArgs) -> Result<()> {
+    let base = match args.key_dir {
+        Some(dir) => dir,
+        None => dirs::home_dir()
+            .context("could not determine home directory")?
+            .join(".jobchain"),
     };
 
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create directory {}", dir.display()))?;
+    let domain_dir = base.join(&args.domain);
+    let secret_key_path = domain_dir.join("secret.key");
+    let public_key_path = domain_dir.join("public.key");
 
-    let secret_key_path = dir.join("secret.key");
-    let public_key_path = dir.join("public.key");
-    let did_path = dir.join("did.json");
-
-    if !force {
-        for path in [&secret_key_path, &public_key_path, &did_path] {
-            if path.exists() {
-                bail!(
-                    "{} already exists (use --force to overwrite)",
-                    path.display()
-                );
-            }
-        }
+    // Check for existing keys
+    if secret_key_path.exists() && !args.force {
+        bail!(
+            "Keypair already exists for {} at {}. Use --force to overwrite.",
+            args.domain,
+            domain_dir.display()
+        );
     }
 
+    // Create directory
+    std::fs::create_dir_all(&domain_dir)
+        .with_context(|| format!("failed to create directory {}", domain_dir.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&domain_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    // Generate keypair
     let keypair = Keypair::generate().context("failed to generate keypair")?;
 
+    // Save keys
     keypair
         .save(&secret_key_path)
         .context("failed to save secret key")?;
@@ -43,33 +71,32 @@ pub fn run(domain: &str, output_dir: Option<&str>, force: bool) -> anyhow::Resul
         .save_public_key(&public_key_path)
         .context("failed to save public key")?;
 
-    let doc = generate_did_document(domain, &keypair.public_key_bytes());
+    eprintln!("Keypair written to {}", domain_dir.display());
+
+    // Generate DID document
+    let doc = generate_did_document(&args.domain, &keypair.public_key_bytes())
+        .context("failed to generate DID document")?;
     let json = did_document_to_json(&doc).context("failed to serialize DID document")?;
-    fs::write(&did_path, &json).context("failed to write DID document")?;
 
-    println!("Identity initialized in {}", dir.display());
-    println!("  Secret key: {}", secret_key_path.display());
-    println!("  Public key: {}", public_key_path.display());
-    println!("  DID document: {}", did_path.display());
-    println!();
-    print_did_summary(&did_path)?;
-
-    Ok(())
-}
-
-fn print_did_summary(path: &Path) -> anyhow::Result<()> {
-    let contents = fs::read_to_string(path)?;
-    let doc: serde_json::Value = serde_json::from_str(&contents)?;
-
-    if let Some(id) = doc.get("id").and_then(|v| v.as_str()) {
-        println!("DID: {id}");
+    // Output DID document
+    if let Some(output_path) = &args.output {
+        std::fs::write(output_path, &json)
+            .with_context(|| format!("failed to write DID document to {}", output_path.display()))?;
+        eprintln!("DID document written to {}", output_path.display());
+    } else {
+        println!("{json}");
     }
-    if let Some(vms) = doc.get("verificationMethod").and_then(|v| v.as_array())
-        && let Some(first) = vms.first()
-        && let Some(mb) = first.get("publicKeyMultibase").and_then(|v| v.as_str())
-    {
-        println!("Public key (multibase): {mb}");
-    }
+
+    // Summary to stderr
+    let did = jobchain_core::did::domain_to_did(&args.domain)
+        .context("failed to compute DID URI")?;
+    eprintln!("Initialized jobchain identity for {}", args.org);
+    eprintln!("  DID: {did}");
+    eprintln!("  Keys: {}/", domain_dir.display());
+    eprintln!(
+        "  Next: host the DID document at https://{}/.well-known/did.json",
+        args.domain
+    );
 
     Ok(())
 }

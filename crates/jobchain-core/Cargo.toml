@@ -17,6 +17,11 @@ zeroize = { workspace = true }
 bs58 = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+resolve = ["dep:reqwest", "dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -7,3 +7,4 @@ Written to `.finna/specs/07-did-web-resolution.toml`. The spec covers:
 - **Blocking wrapper** — for CLI/test callers that aren't async
 - **12 unit tests + 2 integration tests** covering parsing, extraction, roundtrips, and error cases
 - **Backup**: swap reqwest for ureq if the async/tokio weight isn't justified
+outcome = "success"

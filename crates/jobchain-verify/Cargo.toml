@@ -8,3 +8,10 @@ description = "Signature and credential verification for jobchain"
 
 [dependencies]
 jobchain-core = { path = "../jobchain-core" }
+ed25519-dalek = { workspace = true }
+bs58 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+jobl = { workspace = true }
