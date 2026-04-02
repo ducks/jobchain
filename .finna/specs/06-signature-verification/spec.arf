@@ -1,0 +1,8 @@
+Written to `.finna/specs/06-signature-verification.toml`. The spec covers:
+
+- **Core API**: `verify_credential()` takes a credential + 32-byte public key, extracts the proof, reconstructs the canonical signing input via `signing_payload()`, decodes the multibase signature, and runs `verify_strict` against the Ed25519 key
+- **Full verification**: `verify_credential_full()` adds issuer DID matching to catch credential/key misattribution
+- **Multibase key decoder**: `decode_multibase_key()` bridges DID document `publicKeyMultibase` format to raw 32-byte keys, ready for step 7's DID resolution
+- **Minimal dependencies**: no rand, no chrono — verify crate stays lightweight for WASM compilation
+- **12 test cases** covering valid credentials, tampered fields, wrong keys, bad proof formats, issuer mismatches, and multibase key roundtrips
+- **Fallback plan** for `verify_strict` interop issues and cross-crate canonicalization sharing

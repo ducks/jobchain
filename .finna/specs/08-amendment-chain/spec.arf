@@ -1,0 +1,10 @@
+Spec written to `.finna/specs/08-amendment-chain.toml`. Key design decisions:
+
+- **SHA-256 content hashing** with `sha256:` prefix — hashes the full signed document (including proof), so the hash commits to both the content and its signature
+- **Two-struct model**: `Amendment` (the VC-shaped envelope with chain metadata) and `AmendmentSubject` (the partial field overlay)
+- **`originalCredential` back-pointer** in every amendment — lets you jump straight to the base credential without walking the full chain
+- **`effectiveDate` separate from `issuanceDate`** — a promotion can be announced today but effective next month
+- **Changes as `serde_json::Map`** — flat key-value overlay ("title is now X"), not JSON Patch complexity
+- **Chain verification separate from signature verification** — `verify_link`/`verify_chain` check hash integrity, jobchain-verify handles Ed25519; orthogonal concerns
+- **Unsigned predecessors rejected** — you can't link to a document whose hash would change after signing
+- **`canonicalize()` shared** from credential.rs (made `pub(crate)`) to guarantee identical serialization for hashing and signing

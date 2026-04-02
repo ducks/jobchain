@@ -1,0 +1,9 @@
+Spec written to `.finna/specs/15-verify-wasm-target.toml`.
+
+Key decisions in the spec:
+- **getrandom with "js" feature** — ed25519-dalek's dependency chain needs a getrandom backend on wasm32; the `js` feature provides one via `crypto.getRandomValues`
+- **`default-features = false`** on the jobchain-core dependency — ensures reqwest/tokio (from DID resolution) don't get compiled into the WASM blob
+- **Two wasm-bindgen exports** — `verify_credential_json` (the main entry point) and `decode_multibase_key_hex` (so browser JS can extract public keys from DID documents without reimplementing multicodec)
+- **`opt-level=s`** for the wasm32 target to keep the binary small (<200KB target)
+- **CI gate** — `cargo check --target wasm32-unknown-unknown` catches regressions without needing wasm-pack in CI
+- Backup covers ed25519-dalek C dependency issues, wasm-pack alternatives, and binary size debugging with twiggy

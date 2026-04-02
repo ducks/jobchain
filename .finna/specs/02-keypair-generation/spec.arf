@@ -1,0 +1,8 @@
+Spec written to `.finna/specs/02-keypair-generation.toml`.
+
+Key decisions in the spec:
+- **Raw 32-byte seed files** instead of PEM — simpler, no ASN.1 overhead, dalek reconstructs the full keypair from seed
+- **0o600 permissions** on secret key files — defense in depth
+- **Multibase encoding** (z-base58btc) for public keys — matches W3C DID document conventions
+- **Separate public key export** — the verifying key needs to live independently in `did.json` on the issuer's domain
+- **`#[non_exhaustive]` error enum** — lets you add error variants in later steps without semver breaks

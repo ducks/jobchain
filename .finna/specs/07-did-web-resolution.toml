@@ -1,0 +1,121 @@
+order = 7
+what = "Implement did:web resolution in jobchain-core/src/did.rs — parse a did:web URI, fetch the DID document over HTTPS, extract the verification key"
+why = "Verification requires the verifier to obtain the issuer's public key. Steps 3 and 6 produce and consume DID documents locally, but the real trust chain requires fetching the document from the issuer's domain at runtime. Without resolution, a verifier must receive the public key out-of-band, which defeats the purpose of did:web. This step closes the loop: given a credential with issuer 'did:web:discourse.org', the verifier can resolve that DID to an HTTPS URL, fetch the DID document, extract the Ed25519 public key, and pass it to verify_credential() from step 6."
+
+how = """
+Step-by-step implementation plan:
+
+1. Add reqwest as a workspace dependency for HTTPS fetching:
+   - In root Cargo.toml [workspace.dependencies]: reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+   - Use rustls-tls (not native-tls) to avoid OpenSSL system dependency — keeps builds reproducible across platforms.
+   - Wire into crates/jobchain-core/Cargo.toml: reqwest = { workspace = true }
+   - Also add tokio as a workspace dependency if not already present: tokio = { version = "1", features = ["rt", "macros"] } for async runtime support.
+   - Gate the resolution module behind an optional feature flag so downstream consumers (like WASM targets in jobchain-verify) can compile without reqwest:
+     In crates/jobchain-core/Cargo.toml: [features] resolve = ["dep:reqwest", "dep:tokio"] and mark both deps as optional.
+
+2. Extend the DidError enum in crates/jobchain-core/src/did.rs with resolution-specific variants:
+   - InvalidDidUri(String) — URI doesn't start with "did:web:" or has empty method-specific identifier
+   - ResolutionFailed(String) — HTTP request failed (network error, non-200 status, timeout)
+   - InvalidDocument(String) — fetched JSON does not parse as a DidDocument or is missing required fields
+   - KeyNotFound(String) — no Ed25519VerificationKey2020 found in the document's verificationMethod array
+   - MultibaseDecodeError(String) — publicKeyMultibase value is malformed (wrong prefix, bad base58, wrong length/codec header)
+   Keep the existing variants (InvalidDomain, Serialization) unchanged.
+
+3. Implement the did:web URI parser:
+   - fn parse_did_web_uri(did: &str) -> Result<String, DidError>
+   - Validates the URI starts with "did:web:", else return Err(InvalidDidUri).
+   - Extracts the method-specific identifier (everything after "did:web:").
+   - Reverses the domain_to_did() encoding from step 3:
+     a. Percent-decode %3A back to colons (for port numbers): "localhost%3A8080" → "localhost:8080".
+     b. Convert colons in the path portion to slashes: "example.com:org:dept" → "example.com/org/dept".
+   - Build the resolution URL per the did:web spec (https://w3c-ccg.github.io/did-method-web/):
+     a. If the method-specific identifier contains no path separators (no colons after domain decode), the URL is: https://{domain}/.well-known/did.json
+     b. If it contains path components, the URL is: https://{domain}/{path}/did.json
+     Examples:
+       "did:web:discourse.org" → "https://discourse.org/.well-known/did.json"
+       "did:web:example.com:org:dept" → "https://example.com/org/dept/did.json"
+       "did:web:localhost%3A8080" → "https://localhost:8080/.well-known/did.json"
+   - Return the HTTPS URL string.
+
+4. Implement the async DID document fetcher (gated behind #[cfg(feature = "resolve")]):
+   - pub async fn resolve_did_web(did: &str) -> Result<DidDocument, DidError>
+   - Calls parse_did_web_uri() to get the URL.
+   - Fetches the URL using reqwest::Client with:
+     a. A 10-second timeout (configurable later, but sane default for DNS + TLS + response).
+     b. User-Agent header: "jobchain/{version}" using env!("CARGO_PKG_VERSION").
+     c. Accept header: "application/did+ld+json, application/json" per DID Core spec content negotiation.
+   - Checks the HTTP status: if not 200, return Err(ResolutionFailed) with status code and URL.
+   - Deserializes the response body as DidDocument using serde_json.
+   - Validates the deserialized document:
+     a. doc.id must equal the input DID URI (prevents a server from returning a document for a different DID).
+     b. doc.verification_method must be non-empty.
+   - Returns the validated DidDocument.
+
+5. Implement the key extraction function:
+   - pub fn extract_verification_key(doc: &DidDocument) -> Result<[u8; 32], DidError>
+   - Iterates doc.verification_method looking for the first entry where type == "Ed25519VerificationKey2020".
+   - If none found, return Err(KeyNotFound).
+   - Extracts the publicKeyMultibase string from the matching method.
+   - Decodes it using the same logic as jobchain-verify's decode_multibase_key():
+     a. Assert starts with 'z' (base58btc multibase prefix), else Err(MultibaseDecodeError).
+     b. Base58-decode the remainder using bs58::decode().
+     c. Assert decoded length is exactly 34 bytes (2-byte multicodec header + 32-byte key), else Err(MultibaseDecodeError).
+     d. Assert first two bytes are 0xed, 0x01 (multicodec ed25519-pub), else Err(MultibaseDecodeError).
+     e. Copy bytes [2..34] into [u8; 32] and return.
+   NOTE: This duplicates decode_multibase_key() from jobchain-verify (step 6). Extract the shared logic into a pub fn in jobchain-core/src/did.rs so both crates use the same implementation. Update jobchain-verify's decode_multibase_key() to delegate to this function instead of reimplementing.
+
+6. Implement an optional targeted key extraction:
+   - pub fn extract_verification_key_by_id(doc: &DidDocument, key_id: &str) -> Result<[u8; 32], DidError>
+   - Same as extract_verification_key() but matches on verification_method.id == key_id instead of taking the first Ed25519 key.
+   - This is needed when a DID document has multiple keys (e.g. rotation) and the credential's proof.verificationMethod specifies which key was used for signing.
+   - Falls back to Err(KeyNotFound) if no method matches the given key_id.
+
+7. Implement the high-level convenience function that combines resolution + extraction:
+   - pub async fn resolve_and_extract_key(did: &str) -> Result<[u8; 32], DidError> (gated behind #[cfg(feature = "resolve")])
+   - Calls resolve_did_web() then extract_verification_key() on the result.
+   - This is the function the CLI verify command and jobchain-verify will call for end-to-end verification against a live issuer.
+
+8. Implement a synchronous resolution wrapper for non-async callers:
+   - pub fn resolve_did_web_blocking(did: &str) -> Result<DidDocument, DidError> (gated behind #[cfg(feature = "resolve")])
+   - Creates a tokio runtime (tokio::runtime::Runtime::new()) and blocks on resolve_did_web().
+   - This lets the CLI and tests call resolution without being async themselves.
+   - Add a ResolveError(String) variant or reuse ResolutionFailed for runtime creation failures.
+
+9. Write unit tests in did.rs (#[cfg(test)] mod tests) — add to existing tests from step 3:
+   - test_parse_did_web_simple: "did:web:discourse.org" → "https://discourse.org/.well-known/did.json"
+   - test_parse_did_web_with_port: "did:web:localhost%3A8080" → "https://localhost:8080/.well-known/did.json"
+   - test_parse_did_web_with_path: "did:web:example.com:org:dept" → "https://example.com/org/dept/did.json"
+   - test_parse_did_web_invalid_prefix: "did:key:z6Mk..." → Err(InvalidDidUri)
+   - test_parse_did_web_empty_id: "did:web:" → Err(InvalidDidUri)
+   - test_extract_key_from_document: build a DidDocument with a known public key (32 zero bytes encoded as multibase), call extract_verification_key(), assert returned bytes match.
+   - test_extract_key_no_ed25519: build a DidDocument with only a "JsonWebKey2020" method, call extract_verification_key() → Err(KeyNotFound).
+   - test_extract_key_by_id_hit: build a DidDocument with two keys, call extract_verification_key_by_id() with the second key's id → returns second key.
+   - test_extract_key_by_id_miss: call with a non-existent id → Err(KeyNotFound).
+   - test_extract_key_bad_multibase: build a VerificationMethod with publicKeyMultibase = "not-valid" → Err(MultibaseDecodeError).
+   - test_extract_key_wrong_codec: build with multibase-encoded bytes that have wrong codec header (0x00, 0x00) → Err(MultibaseDecodeError).
+   - test_parse_roundtrip_with_domain_to_did: for each test domain, call domain_to_did() then parse_did_web_uri() on the resulting DID, verify the URL resolves to the original domain.
+
+10. Write integration tests gated behind #[cfg(feature = "resolve")] in a tests/ file or in did.rs:
+    - test_resolve_did_web_live: (marked #[ignore] by default — only run manually) resolve "did:web:did.actor:alice" or another known public did:web endpoint, assert a DidDocument is returned with a valid verificationMethod. This validates the full HTTP path against a real server.
+    - test_resolve_did_web_not_found: (marked #[ignore]) attempt to resolve "did:web:nonexistent.invalid", assert ResolutionFailed error.
+
+11. Extract the multibase key decoding into a shared public function:
+    - Move or refactor decode_multibase_key() so it lives in jobchain-core/src/did.rs as:
+      pub fn decode_multibase_ed25519_pubkey(multibase: &str) -> Result<[u8; 32], DidError>
+    - Update extract_verification_key() and extract_verification_key_by_id() to call this function.
+    - In step 6's jobchain-verify, update decode_multibase_key() to delegate:
+      pub fn decode_multibase_key(multibase: &str) -> Result<[u8; 32], VerificationError> {
+          jobchain_core::did::decode_multibase_ed25519_pubkey(multibase)
+              .map_err(|e| VerificationError::InvalidPublicKey(e.to_string()))
+      }
+    - This ensures encoding/decoding logic has a single source of truth.
+
+12. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+    Run `cargo check --workspace --no-default-features` to verify the crate compiles without the resolve feature (no reqwest/tokio).
+"""
+
+backup = "If reqwest is too heavy or causes compile issues (e.g. ring/rustls conflicts), use ureq 3.x instead — it's synchronous and lightweight, which eliminates the need for tokio and the async/blocking split entirely. The API becomes: ureq::get(url).call()?.body_mut().read_to_string(). If feature-gating causes ergonomic issues across the workspace, skip the feature flag and just make reqwest a required dependency of jobchain-core — revisit gating when the WASM target (step 15) is implemented. If the did:web spec's content negotiation (application/did+ld+json) causes 406 errors from some servers, fall back to Accept: application/json only."
+
+[context]
+files = ["crates/jobchain-core/src/did.rs", "crates/jobchain-core/src/lib.rs", "crates/jobchain-core/Cargo.toml", "crates/jobchain-verify/src/lib.rs", "crates/jobchain-verify/Cargo.toml", "Cargo.toml"]
+dependencies = ["reqwest 0.12 (rustls-tls, json features)", "tokio 1.x (rt, macros features)", "bs58 0.5", "serde_json 1.x", "thiserror 2.x"]

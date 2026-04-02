@@ -1,0 +1,260 @@
+order = 16
+what = "Integration test covering the full flow: init keypair, issue credential from jobl data, amend it, verify both original and amendment, generate wallet — proving every step works together end-to-end"
+why = "Each step so far has unit and focused integration tests, but none exercise the complete issuer-to-holder-to-verifier loop in a single test run. This step adds a self-contained integration test that wires together init, issue, amend, verify, and wallet build using the CLI binary, catching interface mismatches between steps that per-command tests can't detect. It also serves as a living specification: if this test passes, the system works. The test operates entirely on temp directories and local keys — no network, no WASM, no browser — so it runs in CI without extra tooling."
+
+how = """
+Step-by-step implementation plan:
+
+1. Create crates/jobchain-cli/tests/end_to_end.rs as the integration test file.
+   - Add to dev-dependencies in crates/jobchain-cli/Cargo.toml (if not already present):
+     assert_cmd = { workspace = true }
+     predicates = { workspace = true }
+     serde_json = { workspace = true }
+     tempfile = "3"
+   - tempfile is used for isolated temp directories per test run. Add to workspace
+     dev-dependencies in root Cargo.toml: tempfile = "3"
+
+2. Write a helper module at the top of end_to_end.rs for shared test plumbing:
+   - fn jobchain() -> assert_cmd::Command — returns Command::cargo_bin("jobchain").unwrap()
+   - fn setup_dirs() -> (TempDir, PathBuf, PathBuf, PathBuf)
+     Creates a TempDir and returns paths for:
+       key_dir: tempdir/keys/       (--key-dir target for init)
+       creds_dir: tempdir/creds/    (output dir for issued credentials and amendments)
+       wallet_dir: tempdir/wallet/  (output dir for wallet build)
+     Creates the key_dir and creds_dir subdirectories. Does NOT create wallet_dir
+     (wallet build should create it).
+   - fn sample_experience_json() -> String
+     Returns a valid jobl ExperienceItem JSON string for testing:
+     {
+       "title": "Infrastructure Engineer",
+       "company": "Acme Corp",
+       "start": "2023-06",
+       "technologies": ["Rust", "Nix"],
+       "highlights": ["Built credential system", "Automated deployments"]
+     }
+   - fn sample_patch_json() -> String
+     Returns a JSON patch for amending the credential:
+     {
+       "title": "Senior Infrastructure Engineer"
+     }
+
+3. Write the primary end-to-end test: test_full_flow_init_issue_amend_verify_wallet
+
+   This is a single #[test] function that runs the complete flow sequentially.
+   Each step depends on the output of the previous one, so they cannot be parallelized.
+
+   a. INIT — Generate a keypair and DID document:
+      - Run: jobchain init --org "Acme Corp" --domain acme.example.com
+                            --key-dir {key_dir} --output {key_dir}/did.json
+      - Assert: exit code 0.
+      - Assert: {key_dir}/acme.example.com/secret.key exists and is non-empty.
+      - Assert: {key_dir}/acme.example.com/public.key exists and is non-empty.
+      - Assert: {key_dir}/did.json exists.
+      - Read and parse did.json as serde_json::Value.
+      - Assert: did.json has "id" == "did:web:acme.example.com".
+      - Assert: did.json has a verificationMethod array with at least one entry
+        containing "publicKeyMultibase" starting with "z".
+
+   b. ISSUE — Create a signed credential from jobl data:
+      - Pipe sample_experience_json() to stdin.
+      - Run: jobchain issue --domain acme.example.com --key-dir {key_dir}
+                             --output {creds_dir}/acme-2023.vc.json
+      - Assert: exit code 0.
+      - Assert: {creds_dir}/acme-2023.vc.json exists.
+      - Read and parse the credential as serde_json::Value.
+      - Assert: has "@context" array containing "https://www.w3.org/2018/credentials/v1".
+      - Assert: has "type" array containing "VerifiableCredential" and "EmploymentCredential".
+      - Assert: has "issuer" == "did:web:acme.example.com".
+      - Assert: has "issuanceDate" as a non-empty string.
+      - Assert: credentialSubject.title == "Infrastructure Engineer".
+      - Assert: credentialSubject.company == "Acme Corp".
+      - Assert: has "proof" object with type "Ed25519Signature2020".
+      - Assert: proof.proofValue starts with "z" (multibase base58btc).
+      - Assert: proof.verificationMethod contains "acme.example.com#key-1".
+      - Save the credential JSON string for later verification steps.
+
+   c. ISSUE a second credential (different role, for wallet diversity):
+      - Create a second experience JSON:
+        {"title": "DevOps Lead", "company": "Acme Corp", "start": "2021-01",
+         "end": "2023-05", "technologies": ["Terraform", "Ansible"],
+         "highlights": ["Led platform migration"]}
+      - Run: jobchain issue --domain acme.example.com --key-dir {key_dir}
+                             --output {creds_dir}/acme-2021.vc.json
+      - Assert: exit code 0.
+      - Assert: file exists and parses as a valid signed credential.
+
+   d. VERIFY original credential (offline, with local key):
+      - Run: jobchain verify --input {creds_dir}/acme-2023.vc.json
+                              --key {key_dir}/acme.example.com/public.key
+      - Assert: exit code 0.
+      - Assert: stdout or stderr contains a success indicator (e.g. "valid", "verified",
+        or exit code 0 is sufficient depending on CLI output design).
+
+   e. VERIFY with --json output flag:
+      - Run: jobchain verify --input {creds_dir}/acme-2023.vc.json
+                              --key {key_dir}/acme.example.com/public.key --json
+      - Assert: exit code 0.
+      - Parse stdout as JSON.
+      - Assert: result contains "valid": true (or equivalent field).
+
+   f. AMEND — Promote the engineer:
+      - Run: jobchain amend --credential {creds_dir}/acme-2023.vc.json
+                             --patch <(sample_patch_json()) or via stdin
+                             --domain acme.example.com
+                             --effective-date 2025-01-15
+                             --key-dir {key_dir}
+                             --output {creds_dir}/acme-2023-amend-1.amend.json
+      - Assert: exit code 0.
+      - Assert: amendment file exists.
+      - Read and parse the amendment as serde_json::Value.
+      - Assert: has "type" array containing "AmendmentCredential".
+      - Assert: has "previousHash" starting with "sha256:".
+      - Assert: has "effectiveDate" == "2025-01-15".
+      - Assert: credentialSubject.type == "AmendmentRecord".
+      - Assert: credentialSubject.originalCredential starts with "sha256:".
+      - Assert: credentialSubject.changes.title == "Senior Infrastructure Engineer".
+      - Assert: has "proof" object (signed amendment).
+
+   g. VERIFY the amendment (its own signature is valid):
+      - Run: jobchain verify --input {creds_dir}/acme-2023-amend-1.amend.json
+                              --key {key_dir}/acme.example.com/public.key
+      - Assert: exit code 0.
+      - The amendment is a W3C VC-shaped document, so the same verify command works.
+
+   h. VERIFY the amendment chain links are intact:
+      - This may be a separate verify subcommand or flag (e.g. --chain), depending on
+        the CLI design from step 12/13. If the CLI supports chain verification:
+        Run: jobchain verify --input {creds_dir}/acme-2023-amend-1.amend.json
+                              --chain {creds_dir}/acme-2023.vc.json
+                              --key {key_dir}/acme.example.com/public.key
+        Assert: exit code 0, indicating both signature and chain link are valid.
+      - If the CLI does not have a --chain flag, verify chain integrity programmatically:
+        read both files, compute content_hash of the credential, assert it matches
+        the amendment's previousHash field. This is a JSON-level assertion in the test.
+
+   i. WALLET BUILD — Generate the static site:
+      - Run: jobchain wallet build --dir {creds_dir} --out {wallet_dir}
+                                    --title "Acme Corp Credentials"
+                                    --base-url "https://acme.example.com/credentials"
+      - Assert: exit code 0.
+      - Assert: {wallet_dir}/index.html exists and is non-empty.
+      - Assert: {wallet_dir}/index.json exists.
+      - Assert: at least two {slug}.html files exist in wallet_dir (one per credential).
+      - Assert: .vc.json files are copied to wallet_dir.
+      - Assert: .amend.json files are copied to wallet_dir.
+
+   j. WALLET MANIFEST validation:
+      - Read and parse {wallet_dir}/index.json as serde_json::Value.
+      - Assert: has "@context" array.
+      - Assert: has "type" == "CredentialWallet".
+      - Assert: has "holder" == "Acme Corp Credentials".
+      - Assert: "credentials" is an array with exactly 2 entries.
+      - For the credential that was amended:
+        Assert: its "amendments" array has exactly 1 entry.
+        Assert: the amendment entry has "effectiveDate" == "2025-01-15".
+        Assert: the amendment entry has changes.title == "Senior Infrastructure Engineer".
+      - Assert: "generatedAt" is a valid ISO 8601 timestamp.
+      - Assert: credentialUrl values start with "https://acme.example.com/credentials/"
+        (because --base-url was provided).
+
+   k. WALLET HTML content validation:
+      - Read the index.html file as a string.
+      - Assert: contains "Acme Corp Credentials" (the title).
+      - Assert: contains "Infrastructure Engineer" and "DevOps Lead" (both credential titles).
+      - Assert: contains "acme.example.com" (the issuer domain).
+      - Read one of the credential detail HTML pages.
+      - Assert: contains a <script type="application/json"> tag (embedded credential JSON).
+      - Assert: contains the credential's title and company.
+
+4. Write a focused negative-path test: test_verify_rejects_tampered_credential
+
+   a. Run init and issue a credential (reuse helpers from step 3).
+   b. Read the signed credential JSON, parse it, modify a field in credentialSubject
+      (e.g. change the title), re-serialize, write to a new file.
+   c. Run: jobchain verify --input {tampered_file} --key {public_key}
+   d. Assert: exit code is non-zero (verification failure).
+   e. If --json flag is available, also verify the JSON output contains "valid": false.
+
+5. Write a focused negative-path test: test_verify_rejects_wrong_key
+
+   a. Run init TWICE with different domains to get two different keypairs.
+   b. Issue a credential with keypair A.
+   c. Verify the credential with keypair B's public key.
+   d. Assert: exit code is non-zero (wrong key = invalid signature).
+
+6. Write a focused test: test_amend_chain_two_amendments
+
+   a. Init and issue a credential.
+   b. Amend the credential (amendment 1: title change).
+   c. Amend again, chaining from amendment 1 (amendment 2: add end date).
+      The CLI invocation should reference the previous amendment in the chain:
+      jobchain amend --credential {original.vc.json}
+                     --chain {amend-1.amend.json}
+                     --patch '{"end": "2025-06"}'
+                     --domain acme.example.com
+                     --effective-date 2025-06-30
+                     --key-dir {key_dir}
+                     --output {amend-2.amend.json}
+   d. Verify both amendments' signatures individually.
+   e. Verify the chain links: amendment-1.previousHash matches hash of credential,
+      amendment-2.previousHash matches hash of amendment-1.
+   f. Build a wallet including the credential and both amendments.
+   g. Assert: index.json shows 2 amendments for the credential.
+
+7. Write a focused test: test_issue_from_stdin_pipe
+
+   a. Init a keypair.
+   b. Issue a credential by piping the experience JSON to stdin (no --input file):
+      echo '{...}' | jobchain issue --domain ... --key-dir ...
+   c. Assert: credential JSON is written to stdout (or --output file).
+   d. Verify the credential.
+
+8. Write a focused test: test_wallet_empty_dir_succeeds
+
+   a. Run wallet build on an empty credentials directory.
+   b. Assert: exit code 0.
+   c. Assert: index.html and index.json exist.
+   d. Assert: index.json has an empty credentials array.
+
+9. Write a focused test: test_wallet_no_force_fails_on_existing_output
+
+   a. Create a non-empty wallet output directory.
+   b. Run wallet build targeting that directory without --force.
+   c. Assert: exit code non-zero.
+   d. Assert: stderr mentions "--force" or "not empty".
+
+10. Add a CI integration in the test:
+    - All tests use #[test] and run via `cargo test -p jobchain-cli --test end_to_end`.
+    - No network access required (all verification uses --key with local public key).
+    - No WASM toolchain required (wallet build without WASM is valid — buttons omitted).
+    - Tests that need multiple sequential CLI invocations use a single #[test] function
+      rather than separate tests, to keep the flow readable and avoid temp directory
+      proliferation. Each test cleans up via TempDir's Drop.
+
+11. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+    Pay special attention to:
+    - Ensure no test depends on execution order (each test sets up its own state).
+    - Ensure no test leaves files outside its TempDir.
+    - Ensure tests don't rely on ~/.jobchain/ (always pass --key-dir to isolate from
+      the user's real keystore).
+"""
+
+backup = "If the CLI argument interface differs from what the spec assumes (e.g. --key-dir is named differently, or amend uses --previous instead of --chain), adjust the test invocations to match the actual CLI from steps 10-14 — the test is testing behavior, not argument names. If assert_cmd's stdin piping proves unreliable for large JSON, write the experience JSON to a temp file and use --input instead. If the wallet build step requires WASM assets and refuses to run without them, add --no-wasm or rely on the fallback behavior documented in step 14 (generate site without verify buttons). If tempfile crate introduces version conflicts, use std::env::temp_dir() with a random subdirectory name and manual cleanup in a Drop guard."
+
+[context]
+files = [
+  "crates/jobchain-cli/tests/end_to_end.rs",
+  "crates/jobchain-cli/Cargo.toml",
+  "crates/jobchain-cli/src/main.rs",
+  "crates/jobchain-cli/src/commands/mod.rs",
+  "crates/jobchain-cli/src/commands/init.rs",
+  "crates/jobchain-cli/src/commands/issue.rs",
+  "crates/jobchain-cli/src/commands/verify.rs",
+  "crates/jobchain-cli/src/commands/amend.rs",
+  "crates/jobchain-cli/src/commands/wallet.rs",
+  "crates/jobchain-core/src/signing.rs",
+  "crates/jobchain-core/src/credential.rs",
+  "crates/jobchain-core/src/amendment.rs",
+  "Cargo.toml",
+]
+dependencies = ["assert_cmd 2.x", "predicates 3.x", "serde_json 1.x", "tempfile 3.x"]

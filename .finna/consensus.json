@@ -1,0 +1,38 @@
+
+
+```json
+{
+  "approach": "Build jobchain as a Cargo workspace with three crates: jobchain-core (credential types, Ed25519 signing/verification, did:web resolution, jobl integration), jobchain-cli (clap-based binary exposing init/issue/amend/verify/wallet commands), and jobchain-verify (lightweight public verification library). Phase 1 focuses on the signing pipeline: keypair generation, credential issuance wrapping jobl experience entries as W3C VC credentialSubject, signature verification, and did:web DID document hosting. The wallet is a minimal static-site generator using inline HTML templates (no framework). Adapters come later as a trait in core with concrete implementations as separate crates or feature-gated modules. The credential format is a strict W3C VC Data Model v1.1 subset using JSON (not full JSON-LD processing) with Ed25519Signature2020 proofs.",
+  "key_decisions": [
+    "JSON-only W3C VC subset, not full JSON-LD with RDF processing — avoids the JSON-LD canonicalization complexity while staying spec-compatible. Trade-off: loses linked-data interop with generic VC wallets, but those don't exist in practice for employment credentials anyway.",
+    "ed25519-dalek over ring for signing — better ergonomics, pure Rust, and the dalek ecosystem aligns with the VC community's Ed25519Signature2020 suite. ring would be faster but overkill for credential signing volumes.",
+    "did:web as sole DID method initially — DNS is the trust anchor, no blockchain dependency. The known risk (company domain lapses, credentials become unverifiable) is mitigated later via optional did:key fallback embedded in credentials and a credential archival strategy.",
+    "Cargo workspace with core/cli/verify split — verify crate stays minimal for embedding in ATS tools or WASM targets. Core handles the heavy lifting. CLI is a thin clap wrapper.",
+    "Credentials wrap jobl experience entries directly by depending on the jobl crate's types — reuse the existing Experience struct as credentialSubject rather than defining a parallel schema. This keeps jobl as the single source of truth for resume structure.",
+    "Amendments modeled as a linked list of signed documents — each amendment references the previous credential/amendment by content hash, forming an independently-verifiable chain. No need for a central registry.",
+    "Static-site wallet uses no JavaScript framework — just templated HTML with inline signature verification via a small WASM module compiled from jobchain-verify. The wallet is a folder of files, not an app.",
+    "Adapter trait defined early but concrete adapters deferred — the trait interface (on_hire, on_title_change, on_departure) is designed in Phase 1 so the signing pipeline supports it, but BambooHR/GitHub implementations wait for Phase 4-5."
+  ],
+  "files": [
+    "Cargo.toml",
+    "crates/jobchain-core/Cargo.toml",
+    "crates/jobchain-core/src/lib.rs",
+    "crates/jobchain-core/src/credential.rs",
+    "crates/jobchain-core/src/signing.rs",
+    "crates/jobchain-core/src/did.rs",
+    "crates/jobchain-core/src/amendment.rs",
+    "crates/jobchain-core/src/adapter.rs",
+    "crates/jobchain-cli/Cargo.toml",
+    "crates/jobchain-cli/src/main.rs",
+    "crates/jobchain-cli/src/commands/init.rs",
+    "crates/jobchain-cli/src/commands/issue.rs",
+    "crates/jobchain-cli/src/commands/verify.rs",
+    "crates/jobchain-cli/src/commands/amend.rs",
+    "crates/jobchain-cli/src/commands/wallet.rs",
+    "crates/jobchain-cli/src/commands/mod.rs",
+    "crates/jobchain-verify/Cargo.toml",
+    "crates/jobchain-verify/src/lib.rs",
+    "PLAN.md"
+  ]
+}
+```

@@ -1,0 +1,155 @@
+order = 12
+what = "Implement 'jobchain verify' CLI command that reads a signed credential, resolves the issuer's DID to fetch their public key, verifies the Ed25519 signature, and prints the result"
+why = "This is the consumer-side payoff for the entire system. Steps 1–11 let an issuer generate keys, create DID documents, and sign credentials — but without a verify command, the only way to check a credential is to write custom code against jobchain-verify. This command makes verification a one-liner: pipe in a credential JSON and get a clear pass/fail. It closes the issue→verify loop end-to-end through the CLI, proves the full trust chain (credential → issuer DID → HTTPS-hosted DID document → public key → signature check), and establishes the output conventions (exit codes, structured output) that downstream tooling and scripts will rely on."
+
+how = """
+Step-by-step implementation plan:
+
+1. Create crates/jobchain-cli/src/commands/verify.rs and add `pub mod verify;` to commands/mod.rs.
+
+2. Define VerifyArgs in commands/verify.rs:
+   - --input <path>: Option<PathBuf> — path to a JSON file containing a signed VerifiableCredential. If omitted, read from stdin. This supports both `jobchain verify --input credential.json` and `cat credential.json | jobchain verify`.
+   - --key <path>: Option<PathBuf> — path to a raw 32-byte public key file (e.g. the public.key produced by `jobchain init`). If provided, skip DID resolution and verify directly against this key. Useful for offline verification and testing.
+   - --offline: bool, default false — if set, require --key and refuse to perform DID resolution. Fails with a clear error if --key is not provided alongside --offline. This makes the "no network" intent explicit.
+   - --json: bool, default false — if set, output the verification result as a JSON object to stdout instead of human-readable text. Format: {"valid": true/false, "issuer": "did:web:...", "subject": {"title": "...", "company": "..."}, "issuanceDate": "...", "error": null|"reason"}. Useful for scripting and piping into other tools.
+
+3. Add the Verify(VerifyArgs) variant to the Commands enum in main.rs:
+   - Commands::Verify(args) => commands::verify::run(args)
+
+4. Ensure jobchain-cli depends on jobchain-core with the "resolve" feature enabled:
+   - In crates/jobchain-cli/Cargo.toml: jobchain-core = { path = "../jobchain-core", features = ["resolve"] }
+   - Also depend on jobchain-verify: jobchain-verify = { path = "../jobchain-verify" }
+   - Add tokio = { workspace = true } for async runtime (needed for resolve_did_web).
+
+5. Implement the verify command execution (pub fn run(args: VerifyArgs) -> anyhow::Result<()>):
+
+   a. Read the credential input:
+      - If args.input is Some(path): read the file to a string with std::fs::read_to_string(&path).
+      - If args.input is None: read stdin to a string with std::io::read_to_string(std::io::stdin()).
+      - If stdin is a TTY (detect via std::io::stdin().is_terminal()), print a hint to stderr: "Reading credential from stdin (paste JSON, then Ctrl+D)..."
+      - Deserialize the string as a VerifiableCredential using serde_json::from_str(). On parse failure, return error: "Failed to parse credential: {serde error}. Expected a signed W3C Verifiable Credential JSON."
+
+   b. Extract the issuer DID and proof block early for reporting:
+      - Let issuer = &credential.issuer (the did:web URI string).
+      - Verify that credential.proof is Some — if None, report failure immediately: "Credential has no proof block — it is unsigned."
+
+   c. Obtain the public key (branching on --key vs DID resolution):
+
+      If args.key is Some(key_path):
+        - Read the 32-byte public key file: std::fs::read(&key_path).
+        - Validate it is exactly 32 bytes, else error: "Public key file must be exactly 32 bytes, got {n}."
+        - Convert to [u8; 32].
+        - Print to stderr: "Using local key: {key_path}"
+
+      Else if args.offline is true:
+        - Return error: "--offline requires --key <path> to supply the public key directly."
+
+      Else (online DID resolution — the default path):
+        - Print to stderr: "Resolving issuer DID: {issuer}"
+        - Extract the verification_method key ID from the proof block (proof.verification_method, e.g. "did:web:discourse.org#key-1").
+        - Call jobchain_core::did::resolve_did_web_blocking(issuer) to fetch the DID document.
+        - On resolution failure, report: "Failed to resolve DID {issuer}: {error}. Use --key to verify with a local public key instead."
+        - Extract the public key from the DID document using extract_verification_key_by_id() with the proof's verification_method as the key ID. If that fails (key ID not found), fall back to extract_verification_key() (first Ed25519 key). If both fail, error: "No Ed25519 verification key found in DID document for {issuer}."
+
+   d. Verify the signature:
+      - Call jobchain_verify::verify_credential_full(&credential, &public_key, issuer).
+      - This checks: (1) proof type is Ed25519Signature2020, (2) signature is valid over the canonical payload, (3) issuer field matches the expected DID, (4) verification_method belongs to the issuer.
+
+   e. Report the result:
+
+      On success (Ok(())):
+        - If --json: print {"valid": true, "issuer": "{issuer}", "subject": {"title": "...", "company": "..."}, "issuanceDate": "..."} to stdout.
+        - Else: print to stdout:
+          "VALID — credential signature verified"
+          "  Issuer:  {issuer}"
+          "  Subject: {title} at {company}"
+          "  Issued:  {issuance_date}"
+          "  Signed:  {proof.created}"
+        - Exit code 0.
+
+      On failure (Err(e)):
+        - If --json: print {"valid": false, "issuer": "{issuer}", "subject": {...}, "issuanceDate": "...", "error": "{error description}"} to stdout.
+        - Else: print to stderr:
+          "INVALID — {error description}"
+          "  Issuer:  {issuer}"
+          "  Subject: {title} at {company}"
+        - Exit code 1 (use std::process::exit(1) after printing, or return an Err that main translates to exit code 1).
+
+6. Handle the stdin TTY detection the same way as the issue command (step 11):
+   - Use std::io::stdin().is_terminal() (Rust 1.70+ std::io::IsTerminal trait).
+
+7. Write integration tests in crates/jobchain-cli/tests/verify.rs:
+
+   - test_verify_valid_credential:
+     Set up: run `jobchain init` in a tempdir to create keypair + DID doc, run `jobchain issue` to produce a signed credential, host the DID doc on a local HTTP server (use a simple test fixture or mock).
+     Since DID resolution requires a live server, use --key instead for this test:
+     Run: `jobchain verify --input credential.json --key {tmpdir}/{domain}/public.key`
+     Assert: exit code 0, stdout contains "VALID".
+
+   - test_verify_invalid_signature:
+     Set up: issue a credential, then tamper with the credentialSubject (e.g. change the title field in the JSON file).
+     Run: `jobchain verify --input tampered.json --key {tmpdir}/{domain}/public.key`
+     Assert: exit code 1, output contains "INVALID".
+
+   - test_verify_wrong_key:
+     Set up: issue a credential with keypair A, generate keypair B with a different domain.
+     Run: `jobchain verify --input credential.json --key {tmpdir}/{other_domain}/public.key`
+     Assert: exit code 1, output contains "INVALID".
+
+   - test_verify_missing_proof:
+     Set up: create a credential JSON with no proof block.
+     Run: `jobchain verify --input unsigned.json --key {tmpdir}/{domain}/public.key`
+     Assert: exit code 1, output mentions "no proof" or "unsigned".
+
+   - test_verify_from_stdin:
+     Set up: issue a valid credential.
+     Run: pipe credential JSON into `jobchain verify --key {tmpdir}/{domain}/public.key`
+     Assert: exit code 0, stdout contains "VALID".
+
+   - test_verify_json_output_valid:
+     Run: `jobchain verify --input credential.json --key {key_path} --json`
+     Assert: stdout parses as JSON, contains "valid": true, has issuer/subject/issuanceDate fields.
+
+   - test_verify_json_output_invalid:
+     Run: verify a tampered credential with --json.
+     Assert: stdout parses as JSON, contains "valid": false, has non-null "error" field.
+
+   - test_verify_offline_without_key:
+     Run: `jobchain verify --input credential.json --offline`
+     Assert: exit code non-zero, stderr contains "--offline requires --key".
+
+   - test_verify_nonexistent_input:
+     Run: `jobchain verify --input does-not-exist.json --key {key_path}`
+     Assert: exit code non-zero, error message mentions file not found.
+
+   - test_verify_roundtrip_init_issue_verify:
+     Full end-to-end without network: init → issue → verify with --key.
+     Assert: the credential produced by issue is accepted by verify.
+
+   Use assert_cmd for running the binary and predicates for assertion helpers (same as steps 10/11).
+
+8. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+
+9. Verify the end-to-end flow manually:
+   - `cargo run -p jobchain-cli -- init --org "Test Corp" --domain example.com --key-dir /tmp/jc-test`
+   - `echo '{"title":"Engineer","company":"Test Corp","start":"2024-01"}' | cargo run -p jobchain-cli -- issue --domain example.com --key-dir /tmp/jc-test > /tmp/jc-test/cred.json`
+   - `cargo run -p jobchain-cli -- verify --input /tmp/jc-test/cred.json --key /tmp/jc-test/example.com/public.key`
+   - Verify it prints "VALID".
+   - Tamper with /tmp/jc-test/cred.json (change title), re-run verify, confirm "INVALID".
+"""
+
+backup = "If DID resolution via reqwest/tokio adds too much complexity to the CLI binary or causes compile-time bloat, implement verify as offline-only first (always require --key) and add DID resolution as a follow-up. If resolve_did_web_blocking() has issues with tokio runtime nesting (e.g. called from within an existing runtime), use a dedicated std::thread to run the async resolution. If the --json output format needs to be more flexible, use serde_json::Value to build the output dynamically rather than a dedicated struct. If stdin reading blocks unexpectedly in CI, add a --no-tty-hint flag or detect CI via env vars to suppress the TTY hint."
+
+[context]
+files = [
+  "crates/jobchain-cli/Cargo.toml",
+  "crates/jobchain-cli/src/main.rs",
+  "crates/jobchain-cli/src/commands/mod.rs",
+  "crates/jobchain-cli/src/commands/verify.rs",
+  "crates/jobchain-cli/src/commands/issue.rs",
+  "crates/jobchain-verify/src/lib.rs",
+  "crates/jobchain-core/src/did.rs",
+  "crates/jobchain-core/src/credential.rs",
+  "Cargo.toml",
+]
+dependencies = ["jobchain-core (resolve feature)", "jobchain-verify", "tokio 1.x", "serde_json 1.x", "clap 4.x", "anyhow 1.x", "assert_cmd 2.x (dev)", "predicates 3.x (dev)"]

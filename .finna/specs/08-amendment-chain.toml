@@ -1,0 +1,184 @@
+order = 8
+what = "Implement the Amendment struct and chain-linking logic in jobchain-core/src/amendment.rs — content-hash each document with SHA-256, link amendments to their predecessor, sign them as standalone W3C VC-shaped documents forming a verifiable linked list"
+why = "Employment credentials are living documents — titles change, teams shift, responsibilities grow. Without amendments the system can only issue immutable snapshots, forcing a full re-issue for every change. The linked-list design lets each amendment reference its predecessor by content hash, so anyone can walk the chain backwards from the latest amendment to the original credential and independently verify every link. This is the foundation the CLI amend command (step 13) and the adapter on_title_change/on_departure hooks (step 9) build on."
+
+how = """
+Step-by-step implementation plan:
+
+1. Add sha2 as a workspace dependency for content hashing:
+   - In root Cargo.toml [workspace.dependencies]: sha2 = "0.10"
+   - Wire into crates/jobchain-core/Cargo.toml: sha2 = { workspace = true }
+   SHA-256 is the content-hash algorithm — widely understood, deterministic, collision-resistant,
+   and produces a 32-byte digest that encodes cleanly as hex. No need for anything fancier.
+
+2. Create crates/jobchain-core/src/amendment.rs and add `pub mod amendment;` to lib.rs.
+
+3. Implement a content_hash function that produces the SHA-256 digest of any signed document:
+   - pub fn content_hash(document: &[u8]) -> String
+     Takes the canonical JSON bytes of a signed credential or amendment (the full document
+     including its proof block — this hashes the complete signed artifact, not just the payload).
+     Computes SHA-256 over the input bytes and returns the hex-encoded digest as a lowercase
+     string prefixed with "sha256:" (e.g. "sha256:a1b2c3...").
+     The prefix makes the hash algorithm explicit and allows future algorithm migration.
+   - Also add a helper to produce hashable bytes from a VerifiableCredential:
+     pub fn hashable_bytes(credential: &VerifiableCredential) -> Result<Vec<u8>, AmendmentError>
+     Serializes the credential (WITH proof) to canonical JSON (sorted keys, compact).
+     Reuse the same canonicalize() function from credential.rs — make it pub(crate) if currently private.
+   - And a parallel helper for amendments:
+     pub fn hashable_amendment_bytes(amendment: &Amendment) -> Result<Vec<u8>, AmendmentError>
+     Same canonical JSON serialization for amendment documents.
+
+4. Define the Amendment struct — a W3C VC-shaped document with chain-linking metadata:
+   - #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+   - context: Vec<String> — #[serde(rename = "@context")], same contexts as VerifiableCredential
+     plus "https://w3id.org/security/suites/ed25519-2020/v1" for the proof suite
+   - r#type: Vec<String> — #[serde(rename = "type")], values: ["VerifiableCredential", "AmendmentCredential"]
+   - issuer: String — did:web URI of the amending party (must match original credential issuer
+     for now; cross-issuer amendments are a future extension)
+   - issuance_date: String — #[serde(rename = "issuanceDate")], ISO 8601 timestamp of when this
+     amendment was created
+   - effective_date: String — #[serde(rename = "effectiveDate")], ISO 8601 date when the change
+     takes effect (may differ from issuance — e.g. promotion announced today, effective next month)
+   - previous_hash: String — #[serde(rename = "previousHash")], the "sha256:..." content hash
+     of the predecessor document (either a VerifiableCredential or another Amendment)
+   - credential_subject: AmendmentSubject — #[serde(rename = "credentialSubject")], the changed fields
+   - proof: Option<Proof> — reuse the existing Proof struct from credential.rs;
+     None before signing, Some after; #[serde(skip_serializing_if = "Option::is_none")]
+
+5. Define the AmendmentSubject struct — a partial overlay of changed fields:
+   - #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+   - r#type: String — always "AmendmentRecord", #[serde(rename = "type")]
+   - original_credential: String — #[serde(rename = "originalCredential")], the content hash
+     of the BASE credential (not the immediate predecessor — this anchors the amendment to the
+     credential it ultimately modifies, enabling direct lookup even in long chains)
+   - changes: serde_json::Map<String, serde_json::Value> — the fields being amended, using
+     the same key names as the original credentialSubject (e.g. "title", "highlights", "end").
+     Using a Map rather than a freeform Value ensures only key-value pairs at the top level —
+     no nested patches, no JSON Patch complexity. An amendment says "title is now X", not
+     "apply this diff."
+
+6. Implement Amendment constructors:
+   - Amendment::from_credential(
+       credential: &VerifiableCredential,
+       changes: serde_json::Map<String, serde_json::Value>,
+       effective_date: &str,
+     ) -> Result<Self, AmendmentError>
+     Computes the content hash of the signed credential (it MUST have a proof — error if None),
+     constructs an Amendment with previous_hash set to that hash, original_credential set to
+     the same hash (since this is the first amendment in the chain), issuer copied from the
+     credential, and issuance_date left empty (filled by sign()).
+     Returns Err if the credential has no proof (can't hash an unsigned document — the hash
+     would change after signing, breaking the link).
+
+   - Amendment::from_amendment(
+       previous: &Amendment,
+       original_credential_hash: &str,
+       changes: serde_json::Map<String, serde_json::Value>,
+       effective_date: &str,
+     ) -> Result<Self, AmendmentError>
+     For chaining: previous_hash is the hash of the previous amendment, original_credential
+     stays the hash of the base credential (passed through). The previous amendment MUST have
+     a proof — same guard as above.
+
+7. Implement signing on Amendment — mirror the credential signing pattern from step 5:
+   - Amendment::signing_payload(&self) -> Result<Vec<u8>, AmendmentError>
+     Clone self, set proof to None, canonicalize to sorted-key compact JSON, return bytes.
+     Identical logic to VerifiableCredential::signing_payload() — reuse canonicalize().
+
+   - Amendment::sign(
+       &mut self,
+       keypair: &crate::signing::Keypair,
+       verification_method: &str,
+     ) -> Result<(), AmendmentError>
+     Same flow as VerifiableCredential::sign():
+       a. Get signing payload bytes.
+       b. Sign with keypair.sign(&payload).
+       c. Encode as multibase base58btc ('z' + bs58).
+       d. Generate ISO 8601 timestamp via chrono::Utc::now().
+       e. Construct Proof and set self.proof = Some(proof).
+       f. Also set self.issuance_date to the same timestamp.
+
+8. Implement chain verification helpers:
+   - pub fn verify_link(
+       amendment: &Amendment,
+       predecessor_bytes: &[u8],
+     ) -> Result<(), AmendmentError>
+     Computes content_hash(predecessor_bytes) and asserts it equals amendment.previous_hash.
+     Returns Ok(()) if the link is valid, Err(AmendmentError::BrokenLink { expected, got })
+     if the hashes don't match. This is the chain integrity check — separate from signature
+     verification (which is handled by jobchain-verify).
+
+   - pub fn verify_chain(
+       base_credential: &VerifiableCredential,
+       amendments: &[Amendment],
+     ) -> Result<(), AmendmentError>
+     Walks the chain from the base credential through each amendment in order:
+       a. Compute hashable_bytes of the base credential.
+       b. Assert amendments[0].previous_hash == content_hash of base credential.
+       c. For each subsequent amendment, assert its previous_hash == content_hash of the
+          preceding amendment's hashable bytes.
+       d. Assert every amendment's original_credential field matches the base credential's hash.
+     Returns Ok(()) if the entire chain is intact, or the first broken link error found.
+     This does NOT verify signatures — that's a separate pass using jobchain-verify.
+     Keeping them separate follows the principle that chain integrity and cryptographic
+     validity are orthogonal checks.
+
+9. Define AmendmentError enum using thiserror:
+   - UnsignedPredecessor — tried to hash a document with no proof
+   - BrokenLink { expected: String, got: String } — previous_hash doesn't match computed hash
+   - InvalidOriginalReference — original_credential hash doesn't match base credential
+   - EmptyChanges — amendment has no fields in the changes map
+   - Serialization(#[from] serde_json::Error) — canonical JSON failed
+   - Signing(#[from] crate::signing::SigningError) — Ed25519 operation failed
+
+10. Implement a convenience function for the common amend-and-sign flow:
+    - pub fn amend_credential(
+        credential: &VerifiableCredential,
+        changes: serde_json::Map<String, serde_json::Value>,
+        effective_date: &str,
+        keypair: &crate::signing::Keypair,
+      ) -> Result<Amendment, AmendmentError>
+      Creates an Amendment::from_credential(), signs it with the keypair using
+      "{credential.issuer}#key-1" as verification_method, returns the signed amendment.
+      This is what the CLI amend command (step 13) will call for the simple case.
+
+11. Write unit tests in amendment.rs (#[cfg(test)] mod tests):
+    - test_content_hash_deterministic: hash the same bytes twice, assert equality.
+    - test_content_hash_prefix: hash some bytes, assert result starts with "sha256:".
+    - test_content_hash_sensitive: hash "hello" and "hello!", assert different results.
+    - test_amendment_from_credential: create and sign a credential, build an amendment,
+      assert previous_hash matches the credential's content hash, original_credential is set.
+    - test_amendment_from_unsigned_fails: try Amendment::from_credential on an unsigned
+      credential (proof is None), assert UnsignedPredecessor error.
+    - test_amendment_sign_attaches_proof: create an amendment, sign it, assert proof is Some
+      with type "Ed25519Signature2020" and a valid multibase proof_value.
+    - test_amendment_signing_payload_excludes_proof: create and sign an amendment, call
+      signing_payload(), parse result, assert no "proof" key.
+    - test_verify_link_valid: sign a credential, create an amendment from it, compute
+      hashable_bytes of the credential, call verify_link — assert Ok(()).
+    - test_verify_link_broken: create an amendment, tamper with previous_hash, call
+      verify_link — assert BrokenLink error.
+    - test_verify_chain_two_amendments: sign a credential, create amendment 1 from credential,
+      sign it, create amendment 2 from amendment 1, sign it, call verify_chain with all three —
+      assert Ok(()).
+    - test_verify_chain_broken_middle: same as above but tamper with amendment 2's previous_hash
+      before signing — verify_chain should return BrokenLink.
+    - test_verify_chain_wrong_original: create an amendment chain but set amendment 2's
+      original_credential to a wrong hash — assert InvalidOriginalReference.
+    - test_amend_credential_convenience: use amend_credential() to produce a signed amendment,
+      verify the link back to the credential, verify the amendment's signature using
+      jobchain-verify — assert both pass.
+    - test_amendment_json_shape: serialize an amendment to JSON, parse as Value, assert all
+      expected keys exist with correct serde rename names (@context, type, issuer,
+      issuanceDate, effectiveDate, previousHash, credentialSubject, proof).
+    - test_empty_changes_rejected: try to create an amendment with an empty changes map —
+      assert EmptyChanges error.
+
+12. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+"""
+
+backup = "If sha2 is considered too heavy (unlikely — it's a core crypto primitive), use the ring crate's SHA-256 implementation since ed25519-dalek already transitively pulls in curve25519-dalek. If the canonical JSON approach causes issues with amendment hashing (e.g. serde_json field ordering changes between versions), pin serde_json and add a test vector with a known hash to catch drift. If the Map<String, Value> type for changes proves too loose and allows nonsensical amendments, introduce a ChangedField enum with typed variants (Title(String), End(String), Technologies(Vec<String>), Highlights(Vec<String>), Custom(String, Value)) — but only if real usage exposes the problem."
+
+[context]
+files = ["crates/jobchain-core/src/amendment.rs", "crates/jobchain-core/src/credential.rs", "crates/jobchain-core/src/signing.rs", "crates/jobchain-core/src/lib.rs", "crates/jobchain-core/Cargo.toml", "Cargo.toml"]
+dependencies = ["sha2 0.10", "serde_json 1.x", "chrono 0.4", "ed25519-dalek 2.x", "bs58 0.5", "thiserror 2.x"]

@@ -1,0 +1,9 @@
+Written to `.finna/specs/07-did-web-resolution.toml`. The spec covers:
+
+- **URI parsing** — reversing the `domain_to_did()` encoding back to an HTTPS URL per the did:web method spec
+- **Async HTTP fetching** — reqwest with rustls-tls, gated behind a `resolve` feature flag so WASM targets can skip it
+- **Key extraction** — pulling Ed25519 public keys from fetched DID documents, with both "first match" and "by key ID" variants
+- **Shared multibase decoding** — extracting the duplicate decode logic from jobchain-verify into a single source of truth in did.rs
+- **Blocking wrapper** — for CLI/test callers that aren't async
+- **12 unit tests + 2 integration tests** covering parsing, extraction, roundtrips, and error cases
+- **Backup**: swap reqwest for ureq if the async/tokio weight isn't justified

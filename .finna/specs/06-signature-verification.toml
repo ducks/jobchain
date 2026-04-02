@@ -1,0 +1,83 @@
+order = 6
+what = "Implement standalone signature verification in the jobchain-verify crate — extract the proof block from a credential, reconstruct the canonical signing input, decode the multibase signature, and verify the Ed25519 signature against a supplied public key"
+why = "Verification is the payoff for everything built in steps 1–5. Without it the system only produces signed artifacts but nobody can check them. This step builds the verification logic as a standalone library in jobchain-verify so it can be embedded in ATS tools, compiled to WASM (step 15), and called from the CLI verify command (step 12) — all without pulling in the full jobchain-core signing/issuance machinery. Getting this right also validates that the canonicalization from step 5 is deterministic: if verify can reproduce the exact signing input from a deserialized credential, the canonical form is proven stable across the sign→serialize→deserialize→verify round trip."
+
+how = """
+Step-by-step implementation plan:
+
+1. Wire jobchain-verify's dependency on jobchain-core in crates/jobchain-verify/Cargo.toml:
+   - jobchain-core = { path = "../jobchain-core" }
+   - ed25519-dalek = { workspace = true }
+   - bs58 = { workspace = true }
+   - serde_json = { workspace = true }
+   - thiserror = { workspace = true }
+   The verify crate should NOT depend on rand or chrono — it only reads and checks, never generates keys or timestamps.
+
+2. Create crates/jobchain-verify/src/lib.rs as the crate's public API surface.
+   Re-export the types a verifier needs from jobchain-core:
+   - pub use jobchain_core::credential::{VerifiableCredential, Proof, CredentialSubject};
+   Keep the re-exports minimal — a verifier should not need to import jobchain-core directly.
+
+3. Define a VerificationError enum in lib.rs using thiserror:
+   - MissingProof — credential has no proof block (proof field is None)
+   - UnsupportedProofType(String) — proof.type is not "Ed25519Signature2020"
+   - InvalidProofValue(String) — proofValue is not valid multibase base58btc (missing 'z' prefix or base58 decode fails)
+   - InvalidSignature — Ed25519 signature verification failed (wrong key, tampered payload, or corrupt signature)
+   - InvalidPublicKey(String) — supplied public key bytes are not a valid Ed25519 point
+   - Serialization(#[from] serde_json::Error) — signing payload reconstruction failed
+   Use #[non_exhaustive] for future extensibility (e.g. revocation checks, expiry).
+
+4. Implement the core verification function:
+   - pub fn verify_credential(credential: &VerifiableCredential, public_key: &[u8; 32]) -> Result<(), VerificationError>
+   This is the primary public API. Steps:
+     a. Extract the proof block: credential.proof.as_ref().ok_or(VerificationError::MissingProof)?
+     b. Validate proof type: assert proof.r#type == "Ed25519Signature2020", else return Err(UnsupportedProofType).
+     c. Decode the signature from proof.proof_value:
+        - Assert the string starts with 'z' (multibase base58btc prefix), else return Err(InvalidProofValue).
+        - Base58-decode the remainder: bs58::decode(&proof_value[1..]).into_vec().
+        - Assert the decoded bytes are exactly 64 bytes (Ed25519 signature size), else return Err(InvalidProofValue).
+        - Construct an ed25519_dalek::Signature from the 64-byte array.
+     d. Construct the verifying key: ed25519_dalek::VerifyingKey::from_bytes(public_key).map_err(|e| InvalidPublicKey(e.to_string())).
+     e. Reconstruct the signing input: call credential.signing_payload() which clones the credential, strips the proof, canonicalizes to sorted-key compact JSON, and returns the bytes. This MUST produce the exact same bytes that step 5's signing used.
+     f. Verify: call verifying_key.verify_strict(&payload, &signature). Use verify_strict (not verify) to reject non-canonical signatures and enforce cofactored verification, matching the Ed25519Signature2020 spec's security requirements.
+     g. Return Ok(()) on success, map dalek's SignatureError to Err(InvalidSignature) on failure.
+
+5. Implement a convenience function that also validates proof metadata:
+   - pub fn verify_credential_full(credential: &VerifiableCredential, public_key: &[u8; 32], expected_issuer_did: &str) -> Result<(), VerificationError>
+   Calls verify_credential() for the cryptographic check, then additionally:
+     a. Asserts credential.issuer == expected_issuer_did (add IssuerMismatch(expected, got) variant to VerificationError).
+     b. Asserts proof.verification_method starts with expected_issuer_did (the key reference must belong to the claimed issuer).
+   This catches the case where a valid credential is presented with a swapped issuer DID — the signature would still verify against the real signer's key, but the issuer claim wouldn't match.
+
+6. Implement a helper for decoding multibase public keys from DID documents:
+   - pub fn decode_multibase_key(multibase: &str) -> Result<[u8; 32], VerificationError>
+   Steps:
+     a. Assert the string starts with 'z', else return Err(InvalidPublicKey).
+     b. Base58-decode the remainder.
+     c. Assert the decoded bytes are exactly 34 bytes (2-byte multicodec header + 32-byte key).
+     d. Assert the first two bytes are 0xed, 0x01 (multicodec ed25519-pub header), else return Err(InvalidPublicKey).
+     e. Copy bytes [2..34] into a [u8; 32] array and return.
+   This bridges step 3's DID document format (publicKeyMultibase) to the raw 32-byte key that verify_credential() accepts. Step 7 (did-web-resolution) will use this when extracting keys from fetched DID documents.
+
+7. Write unit tests in crates/jobchain-verify/src/lib.rs (#[cfg(test)] mod tests):
+   - test_verify_valid_credential: use jobchain-core to generate a keypair, create a credential, sign it, then call verify_credential() with the public key — assert Ok(()).
+   - test_verify_missing_proof: create an unsigned credential (proof is None), call verify_credential() — assert MissingProof error.
+   - test_verify_tampered_subject: sign a credential, then modify credential_subject (e.g. change title), call verify_credential() with the original public key — assert InvalidSignature error. This proves canonicalization is sensitive to field changes.
+   - test_verify_tampered_issuer: sign a credential, change the issuer string, verify — assert InvalidSignature.
+   - test_verify_wrong_key: sign with keypair A, verify with keypair B's public key — assert InvalidSignature.
+   - test_verify_invalid_proof_value: create a credential with a proof block where proof_value is garbage (not valid multibase) — assert InvalidProofValue.
+   - test_verify_unsupported_proof_type: create a credential with proof.type = "RsaSignature2018" — assert UnsupportedProofType.
+   - test_verify_full_issuer_mismatch: sign a credential with issuer "did:web:a.com", call verify_credential_full() with expected_issuer "did:web:b.com" — assert IssuerMismatch.
+   - test_verify_full_happy_path: sign a credential, call verify_credential_full() with correct issuer — assert Ok(()).
+   - test_decode_multibase_key: encode a known 32-byte key with 0xed 0x01 header and 'z' prefix, decode it back, assert roundtrip equality.
+   - test_decode_multibase_key_wrong_prefix: try decoding a string starting with 'f' instead of 'z' — assert InvalidPublicKey.
+   - test_decode_multibase_key_wrong_codec: encode with wrong header bytes (e.g. 0x00 0x00) — assert InvalidPublicKey.
+
+8. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+"""
+
+backup = "If importing VerifiableCredential's signing_payload() across the crate boundary causes issues (e.g. orphan rule or visibility), move the canonicalize + signing_payload logic into a shared module in jobchain-core that both crates can use, or duplicate the canonicalization in jobchain-verify (undesirable but functional — keep them byte-identical via a shared test vector). If verify_strict is too strict for interop (rejects signatures from other Ed25519 implementations), fall back to verify() with a comment explaining the tradeoff. If bs58 decoding of proof values fails on edge cases, add explicit length checks and clearer error messages before calling into bs58."
+
+[context]
+files = ["crates/jobchain-verify/src/lib.rs", "crates/jobchain-verify/Cargo.toml", "crates/jobchain-core/src/credential.rs", "crates/jobchain-core/src/signing.rs", "crates/jobchain-core/src/did.rs", "Cargo.toml"]
+dependencies = ["ed25519-dalek 2.x", "bs58 0.5", "serde_json 1.x", "thiserror 2.x"]

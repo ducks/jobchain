@@ -1,0 +1,9 @@
+Written to `.finna/specs/10-cli-init.toml`. The spec covers:
+
+- **CLI structure**: clap derive with `InitArgs` supporting `--org`, `--domain`, `--output`, `--force`, and `--key-dir`
+- **On-disk layout**: `~/.jobchain/<domain>/secret.key` + `public.key` with restrictive permissions
+- **Overwrite safety**: refuses to clobber existing keys unless `--force` is passed
+- **Output**: DID document JSON to stdout (pipeable) or `--output` file, human summary to stderr
+- **Error handling**: anyhow for the CLI layer, typed errors from core
+- **Integration tests**: 6 tests using assert_cmd covering keypair creation, DID document output, overwrite protection, force mode, file output, and stderr summary
+- **Backup**: fallback for `dirs` crate, clap builder API, and testability extraction

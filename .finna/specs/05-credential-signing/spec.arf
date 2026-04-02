@@ -1,0 +1,10 @@
+Wrote `/home/urho/dev/jobchain/.finna/specs/05-credential-signing.toml`.
+
+The spec covers:
+
+1. **Keypair.sign() / verify()** — thin wrappers on ed25519-dalek's Signer trait, keeping the private key encapsulated
+2. **Canonical JSON** — recursive BTreeMap-based key sorting + compact serialization (no whitespace), proof stripped before serialization
+3. **VerifiableCredential::sign()** — signs the canonical payload, base58btc-encodes the signature with `z` multibase prefix, timestamps with chrono, attaches the full Ed25519Signature2020 proof block
+4. **issue_credential()** convenience function — what the CLI `issue` command will call
+5. **10 tests** covering determinism, roundtrip sign-verify, tamper detection, multibase encoding, and ISO 8601 timestamps
+6. **Fallback** — manual timestamp formatting if chrono is too heavy, serde_json's native BTreeMap if explicit sorting is redundant

@@ -1,0 +1,141 @@
+order = 15
+what = "Add wasm32-unknown-unknown build support to jobchain-verify so the wallet's inline verifier compiles to a small WASM blob that runs Ed25519 signature checks in-browser"
+why = "The wallet (step 14) generates static HTML pages with 'Verify Signature' buttons, but those buttons need a WASM module to actually run verification in-browser without trusting the hosting server. This step makes jobchain-verify compile cleanly to wasm32-unknown-unknown behind a feature flag, exposes a wasm-bindgen entry point that takes credential JSON + public key hex and returns a pass/fail result, and wires up the wasm-pack build so the CLI wallet command can bundle the resulting .wasm + .js glue into the generated site. The module must be small — verification-only dependencies (ed25519-dalek, bs58, serde_json) with no network or async runtime code."
+how = """
+Step-by-step implementation plan:
+
+1. Add wasm-related optional dependencies to crates/jobchain-verify/Cargo.toml:
+   - Add a [features] section with: wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:getrandom"]
+   - Add optional deps:
+     wasm-bindgen = { version = "0.2", optional = true }
+     serde-wasm-bindgen = { version = "0.6", optional = true }
+     getrandom = { version = "0.2", optional = true, features = ["js"] }
+   - getrandom with "js" feature is needed because ed25519-dalek pulls in rand_core
+     which depends on getrandom — on wasm32 targets getrandom needs a backend, and
+     the "js" feature provides one via crypto.getRandomValues. Without this the build
+     fails with a linker error about missing __wasm_imported_modules.
+   - Add [lib] section: crate-type = ["cdylib", "rlib"]
+     cdylib is required for wasm-pack to produce a .wasm binary.
+     rlib keeps the crate usable as a normal Rust dependency for jobchain-cli.
+
+2. Ensure jobchain-core compiles on wasm32-unknown-unknown:
+   - Audit jobchain-core's Cargo.toml for any dependencies that won't compile to wasm32
+     (e.g. reqwest, tokio, std::fs, std::net). These should already be absent from the
+     types/verification path since core handles credential structs and canonicalization,
+     but check that no unconditional dependency pulls in OS-specific code.
+   - If jobchain-core has reqwest/tokio (for DID resolution in step 7), gate those behind
+     a "resolve" or "network" feature that is NOT enabled by jobchain-verify's dependency
+     on jobchain-core. The verify crate's Cargo.toml should depend on:
+     jobchain-core = { path = "../jobchain-core", default-features = false }
+     This ensures the WASM build only compiles the type definitions and signing_payload()
+     logic, not the HTTP client.
+
+3. Create crates/jobchain-verify/src/wasm.rs with the WASM binding:
+   - Gate the entire module: #[cfg(feature = "wasm")]
+   - Import wasm_bindgen::prelude::* and serde_wasm_bindgen.
+   - Implement the public entry point:
+     #[wasm_bindgen]
+     pub fn verify_credential_json(credential_json: &str, public_key_hex: &str) -> JsValue
+   - Implementation:
+     a. Deserialize credential_json into VerifiableCredential using serde_json::from_str.
+     b. Decode public_key_hex from hex string to [u8; 32] (use a simple hand-rolled hex
+        decoder or the hex crate — prefer hand-rolled to avoid adding a dependency for
+        16 lines of code). If hex is malformed or wrong length, return error result.
+     c. Call crate::verify_credential(&credential, &public_key) from the existing lib.rs API.
+     d. Build a result: { "valid": true } on Ok(()), or { "valid": false, "error": "..." }
+        on Err, using serde_json to construct the value, then serde_wasm_bindgen::to_value()
+        to convert to JsValue.
+   - Also expose a helper for multibase key decoding:
+     #[wasm_bindgen]
+     pub fn decode_multibase_key_hex(multibase: &str) -> JsValue
+     Calls crate::decode_multibase_key(), returns { "key_hex": "abcd..." } on success or
+     { "error": "..." } on failure. This lets the browser JS extract a public key from a
+     DID document's publicKeyMultibase field without needing to implement multicodec in JS.
+
+4. Wire wasm.rs into lib.rs:
+   - Add to crates/jobchain-verify/src/lib.rs:
+     #[cfg(feature = "wasm")]
+     pub mod wasm;
+   - This keeps the wasm module completely absent from non-wasm builds.
+
+5. Add a .cargo/config.toml at the workspace root (or crates/jobchain-verify/.cargo/config.toml)
+   for WASM-specific build settings:
+   - This is optional but useful for documenting the wasm build target:
+     [target.wasm32-unknown-unknown]
+     rustflags = ["-C", "opt-level=s"]
+   - opt-level=s (optimize for size) keeps the .wasm output small. The default opt-level=3
+     for release builds optimizes for speed and produces a larger binary.
+
+6. Create a build script or Makefile target for the WASM build:
+   - Add to the workspace root Makefile (or justfile, or a shell script at scripts/build-wasm.sh):
+     wasm-pack build crates/jobchain-verify \
+       --target web \
+       --features wasm \
+       --out-dir ../../target/wasm-pkg \
+       --release
+   - The --target web produces ES module output (init() function + .wasm file), which is
+     what the wallet HTML pages expect.
+   - --out-dir ../../target/wasm-pkg places output in the workspace target/ directory, where
+     the wallet build command (step 14) looks for it.
+   - Document the prerequisite: rustup target add wasm32-unknown-unknown && cargo install wasm-pack
+
+7. Verify the WASM build compiles and the output is reasonably small:
+   - Run the wasm-pack build command from step 6.
+   - Check the .wasm file size: target/wasm-pkg/jobchain_verify_bg.wasm should be under
+     200KB (ideally under 100KB). ed25519-dalek's pure-Rust backend compiles well to WASM.
+   - If the binary is too large (>200KB), run wasm-opt (from the binaryen package) with -Oz:
+     wasm-opt -Oz target/wasm-pkg/jobchain_verify_bg.wasm -o target/wasm-pkg/jobchain_verify_bg.wasm
+   - Inspect the generated .js glue file to confirm it exports verify_credential_json and
+     decode_multibase_key_hex functions.
+
+8. Write tests for the WASM bindings:
+   - Unit tests in wasm.rs gated behind #[cfg(test)] — these test the Rust logic without
+     actually running in a WASM environment:
+     a. test_verify_json_valid: construct a valid signed credential JSON string and the
+        corresponding public key hex, call the underlying verify logic (not wasm_bindgen
+        directly), assert success.
+     b. test_verify_json_invalid_hex: pass a malformed hex key, assert error result.
+     c. test_verify_json_invalid_json: pass garbage JSON, assert error result.
+     d. test_verify_json_wrong_key: pass valid JSON but wrong key hex, assert valid=false.
+     e. test_decode_multibase_roundtrip: encode a key as multibase, decode it via the
+        helper, assert the hex output matches.
+   - These tests run with `cargo test -p jobchain-verify --features wasm` (on the host
+     target, not wasm32). The wasm_bindgen functions themselves are tested by their inner
+     logic — full in-browser testing is deferred to the end-to-end test (step 16).
+   - Add a CI check: `cargo check -p jobchain-verify --target wasm32-unknown-unknown --features wasm`
+     to verify the crate compiles for the WASM target without actually running wasm-pack.
+     This catches regressions where someone adds a non-wasm-compatible dependency.
+
+9. Update the wallet build command (step 14) to use the WASM output:
+   - In crates/jobchain-cli/src/commands/wallet.rs, update the WASM asset discovery logic
+     to copy target/wasm-pkg/jobchain_verify_bg.wasm and target/wasm-pkg/jobchain_verify.js
+     into the generated site's assets/ directory.
+   - Update the HTML templates to import from ./assets/jobchain_verify.js and call
+     verify_credential_json() and decode_multibase_key_hex() when the user clicks Verify.
+   - The JS glue code in each HTML page should:
+     a. Lazy-load the WASM module on first Verify click: import init, { verify_credential_json } from './assets/jobchain_verify.js'; await init();
+     b. Read credential JSON from the inline <script type="application/json"> tag.
+     c. Get the public key hex from a data-pubkey attribute or user input.
+     d. Call verify_credential_json(json, keyHex) and update the DOM with the result.
+
+10. Run full workspace checks:
+    - cargo test --workspace (all native tests pass)
+    - cargo test -p jobchain-verify --features wasm (wasm feature tests pass)
+    - cargo check -p jobchain-verify --target wasm32-unknown-unknown --features wasm (cross-compilation check)
+    - cargo clippy --workspace --all-features (no warnings)
+    - wasm-pack build (produces output under 200KB)
+"""
+
+backup = "If ed25519-dalek's dependency tree pulls in something that won't compile to wasm32 (e.g. a C dependency via ring or a platform-specific getrandom backend), switch to the ed25519-dalek 'u64_backend' or 'u32_backend' feature (pure Rust, no assembly) and pin getrandom to the 'js' feature for the wasm target only via a [target.'cfg(target_arch = \"wasm32\")'.dependencies] section. If wasm-pack itself causes issues, use cargo build --target wasm32-unknown-unknown directly and run wasm-bindgen CLI manually to generate the JS glue — wasm-pack is a convenience wrapper, not a hard requirement. If the output .wasm is too large (>300KB), audit dependencies with twiggy (cargo install twiggy && twiggy top target/wasm-pkg/jobchain_verify_bg.wasm) to find what's bloating it, then either feature-gate the heavy parts or apply wasm-opt -Oz. If cdylib crate-type causes issues with the rlib consumers (cargo complains about duplicate crate types), conditionally set crate-type via a build.rs that checks cfg(target_arch) — or just always include both, which Cargo supports."
+
+[context]
+files = [
+  "crates/jobchain-verify/Cargo.toml",
+  "crates/jobchain-verify/src/lib.rs",
+  "crates/jobchain-verify/src/wasm.rs",
+  "crates/jobchain-core/Cargo.toml",
+  "crates/jobchain-cli/src/commands/wallet.rs",
+  "Cargo.toml",
+  ".cargo/config.toml",
+]
+dependencies = ["wasm-bindgen 0.2", "serde-wasm-bindgen 0.6", "getrandom 0.2 (with js feature)", "wasm-pack (build tool, not a Cargo dep)", "wasm-opt/binaryen (optional, for size optimization)"]

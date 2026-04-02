@@ -1,0 +1,177 @@
+order = 13
+what = "Implement the 'jobchain amend' CLI command that reads an existing signed credential (or amendment), accepts a JSON patch of changed fields, produces a signed amendment linked to the original by SHA-256 content hash, and outputs the amendment JSON"
+why = "Credentials describe living employment relationships — titles change, teams shift, people leave. Without a CLI command wrapping the amendment-chain logic (step 8), the only way to produce an amendment is through library code. This command closes the issue→amend loop the same way verify closed the issue→verify loop: a single CLI invocation that handles input parsing, keypair loading, chain linking, signing, and output. It also establishes the pattern for how amendments flow through the system — a credential in, a patch in, a signed amendment out — which the adapter hooks (step 9) and end-to-end test (step 16) depend on."
+
+how = """
+Step-by-step implementation plan:
+
+1. Create crates/jobchain-cli/src/commands/amend.rs and add `pub mod amend;` to commands/mod.rs.
+
+2. Define AmendArgs in commands/amend.rs:
+   - --credential <path>: PathBuf, required — path to the signed credential JSON file being amended (the base credential or a previous amendment). This is always a file path (not stdin) because the amend command also needs the patch from somewhere, and mixing two stdin sources is impractical.
+   - --patch <path>: Option<PathBuf> — path to a JSON file containing the changed fields as a flat object (e.g. {"title": "Senior Engineer", "end": "2025-12"}). If omitted, read the patch from stdin. This lets you either `jobchain amend --credential cred.json --patch changes.json` or `echo '{"title":"Senior Engineer"}' | jobchain amend --credential cred.json`.
+   - --domain <domain>: String, required — the issuer's domain. Used to locate the signing keypair at ~/.jobchain/<domain>/secret.key and to construct the verification method DID URI. Must match the issuer in the original credential — the command validates this.
+   - --effective-date <date>: Option<String> — ISO 8601 date when the change takes effect (e.g. "2025-04-01"). If omitted, defaults to today's date. This is distinct from issuance_date (when the amendment was signed), which is always set to the signing timestamp.
+   - --output <path>: Option<PathBuf> — if provided, write the signed amendment JSON to this file. If omitted, write to stdout.
+   - --key-dir <path>: Option<PathBuf> — override the default ~/.jobchain/ base directory for keypair lookup. Same semantics as init/issue.
+   - --chain <path>...: Option<Vec<PathBuf>> — optional list of prior amendment files in chain order (oldest first). When provided, the command amends from the LAST amendment in the chain rather than directly from the credential, but still anchors original_credential to the base credential's hash. This supports multi-amendment chains without requiring the user to manually compute hashes.
+
+3. Add the Amend(AmendArgs) variant to the Commands enum in main.rs:
+   - Commands::Amend(args) => commands::amend::run(args)
+
+4. Implement the amend command execution (pub fn run(args: AmendArgs) -> anyhow::Result<()>):
+
+   a. Read the base credential:
+      - Read the file at args.credential to a string with std::fs::read_to_string(&args.credential).
+      - Deserialize as a VerifiableCredential using serde_json::from_str(). On parse failure, return: "Failed to parse credential at {path}: {serde error}. Expected a signed W3C Verifiable Credential JSON."
+      - Validate that credential.proof is Some — if None, return error: "Credential at {path} is unsigned. Only signed credentials can be amended (the content hash covers the proof block)."
+
+   b. Read the patch (changed fields):
+      - If args.patch is Some(path): read the file to a string with std::fs::read_to_string(&path).
+      - If args.patch is None: read stdin to a string with std::io::read_to_string(std::io::stdin()).
+      - If stdin is a TTY, print hint to stderr: "Reading amendment patch from stdin (paste JSON, then Ctrl+D)..."
+      - Parse the string as serde_json::Map<String, serde_json::Value> using serde_json::from_str(). On failure, return: "Failed to parse patch: {error}. Expected a flat JSON object with changed fields, e.g. {\"title\": \"Senior Engineer\", \"end\": \"2025-12\"}."
+      - Validate that the map is non-empty — if empty, return error: "Patch is empty. An amendment must change at least one field."
+
+   c. Load the issuer keypair:
+      - Resolve key directory: base = args.key_dir.unwrap_or_else(|| dirs::home_dir().unwrap().join(".jobchain"))
+      - Secret key path = base.join(&args.domain).join("secret.key")
+      - If secret.key does not exist, return error: "No keypair found for domain '{domain}' at {path}. Run `jobchain init --domain {domain}` first."
+      - Load with jobchain_core::signing::Keypair::load(&secret_key_path).
+
+   d. Validate issuer match:
+      - Construct the expected issuer DID from args.domain using jobchain_core::did::domain_to_did(&args.domain).
+      - Compare with credential.issuer — if they differ, return error: "Domain '{domain}' resolves to issuer '{expected_did}' but the credential was issued by '{credential.issuer}'. Amendments must come from the same issuer."
+
+   e. Determine the effective date:
+      - If args.effective_date is Some(d): use d.
+      - If None: use chrono::Utc::now().format("%Y-%m-%d").to_string().
+
+   f. Build the amendment (branching on --chain):
+
+      If args.chain is None or empty (amending directly from the base credential):
+        - Call jobchain_core::amendment::amend_credential(&credential, changes, &effective_date, &keypair).
+        - This handles content hashing, Amendment::from_credential(), signing, and returns a signed Amendment.
+
+      If args.chain is Some(chain_paths) and non-empty (amending from an existing chain):
+        - Read and deserialize each amendment file in chain_paths order as Amendment structs.
+        - Validate each has a proof (signed).
+        - Compute the base credential's content hash: content_hash(&hashable_bytes(&credential)).
+        - Verify the chain integrity: call verify_chain(&credential, &amendments) to ensure the existing chain links are valid. On failure, return error: "Amendment chain is broken: {error}. Cannot extend a broken chain."
+        - Take the last amendment in the chain as the predecessor.
+        - Call Amendment::from_amendment(&last_amendment, &base_hash, changes, &effective_date).
+        - Sign the new amendment: amendment.sign(&keypair, &format!("{}#key-1", expected_did)).
+        - Return the signed amendment.
+
+   g. Serialize to JSON:
+      - Use serde_json::to_string_pretty(&amendment) for human-readable output.
+
+   h. Output the signed amendment:
+      - If args.output is Some(path): write JSON to that file, print to stderr: "Amendment written to {path}"
+      - If args.output is None: print JSON to stdout.
+      - In both cases, print a summary to stderr:
+        "Amended credential for {credential.credential_subject.company} ({credential.credential_subject.title})"
+        "  Issuer:     {issuer_did}"
+        "  Effective:  {effective_date}"
+        "  Changed:    {comma-separated list of changed field names}"
+        "  Linked to:  {amendment.previous_hash} (truncated to first 16 hex chars)"
+
+5. Handle stdin TTY detection the same way as issue/verify:
+   - Use std::io::stdin().is_terminal() (Rust 1.70+ std::io::IsTerminal trait).
+
+6. Write integration tests in crates/jobchain-cli/tests/amend.rs:
+
+   - test_amend_from_credential:
+     Set up: run init to create keypair in tempdir, run issue to produce a signed credential, write a patch JSON file with {"title": "Senior Engineer"}.
+     Run: `jobchain amend --credential cred.json --patch patch.json --domain example.com --key-dir {tmpdir}`
+     Assert: stdout is valid JSON, parses as an Amendment, has proof with type Ed25519Signature2020, previousHash starts with "sha256:", credentialSubject.changes contains "title", type includes "AmendmentCredential".
+
+   - test_amend_patch_from_stdin:
+     Set up: init, issue a credential.
+     Run: pipe '{"end": "2025-12"}' into `jobchain amend --credential cred.json --domain example.com --key-dir {tmpdir}`
+     Assert: same structure validation as above, changes contains "end".
+
+   - test_amend_custom_effective_date:
+     Run: `jobchain amend --credential cred.json --patch patch.json --effective-date 2025-06-01 --domain example.com --key-dir {tmpdir}`
+     Assert: effectiveDate in output is "2025-06-01".
+
+   - test_amend_default_effective_date:
+     Run: amend without --effective-date.
+     Assert: effectiveDate matches today's date (chrono::Utc::now().format("%Y-%m-%d")).
+
+   - test_amend_output_to_file:
+     Run: `jobchain amend --credential cred.json --patch patch.json --output amendment.json --domain example.com --key-dir {tmpdir}`
+     Assert: amendment.json exists and contains valid signed amendment JSON.
+
+   - test_amend_chain_integrity:
+     Set up: init, issue credential, amend it once to get amendment1.json.
+     Run: `jobchain amend --credential cred.json --chain amendment1.json --patch '{"end": "2025-12"}' --domain example.com --key-dir {tmpdir}`
+     Assert: output amendment has previousHash matching content hash of amendment1.json, originalCredential matching content hash of cred.json.
+
+   - test_amend_chain_verification_catches_broken_link:
+     Set up: init, issue credential, create amendment1.json, tamper with amendment1.json's previousHash.
+     Run: `jobchain amend --credential cred.json --chain amendment1.json --patch '{"end": "2025-12"}' --domain example.com --key-dir {tmpdir}`
+     Assert: non-zero exit code, stderr contains "chain is broken".
+
+   - test_amend_issuer_mismatch:
+     Set up: init with domain A, issue credential, then try to amend with domain B.
+     Run: `jobchain amend --credential cred.json --patch patch.json --domain other.com --key-dir {tmpdir}`
+     Assert: non-zero exit code, stderr contains "issuer" mismatch message.
+
+   - test_amend_unsigned_credential:
+     Set up: create a credential JSON with no proof block.
+     Run: `jobchain amend --credential unsigned.json --patch patch.json --domain example.com --key-dir {tmpdir}`
+     Assert: non-zero exit code, stderr contains "unsigned".
+
+   - test_amend_empty_patch:
+     Run: `jobchain amend --credential cred.json --domain example.com --key-dir {tmpdir}` with stdin piped '{}'.
+     Assert: non-zero exit code, stderr contains "empty" or "at least one field".
+
+   - test_amend_missing_keypair:
+     Run: amend without running init first.
+     Assert: non-zero exit code, stderr contains "No keypair found" and "jobchain init".
+
+   - test_amend_roundtrip_verifiable:
+     Set up: init, issue credential, amend it.
+     Assert: the amendment's Ed25519 signature verifies against the public key (using ed25519-dalek directly or jobchain-verify). Also verify the chain link: content_hash of the credential matches the amendment's previousHash.
+
+   - test_amend_then_verify:
+     Full end-to-end without network: init → issue → amend → verify amendment with --key.
+     Assert: `jobchain verify` accepts the amendment as a valid signed document (exit code 0, "VALID").
+
+   Use assert_cmd for running the binary and predicates for assertion helpers.
+
+7. Sample patch JSON for testing and documentation:
+   {"title": "Senior Infrastructure Engineer", "end": "2025-12"}
+   {"technologies": ["Ruby", "JavaScript", "Docker", "Kubernetes"]}
+   {"highlights": ["Led migration to containerized deployment", "Promoted to senior role"]}
+
+8. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+
+9. Verify the end-to-end flow manually:
+   - `cargo run -p jobchain-cli -- init --org "Test Corp" --domain example.com --key-dir /tmp/jc-test`
+   - `echo '{"title":"Engineer","company":"Test Corp","start":"2024-01"}' | cargo run -p jobchain-cli -- issue --domain example.com --key-dir /tmp/jc-test > /tmp/jc-test/cred.json`
+   - `echo '{"title":"Senior Engineer"}' | cargo run -p jobchain-cli -- amend --credential /tmp/jc-test/cred.json --domain example.com --key-dir /tmp/jc-test > /tmp/jc-test/amend1.json`
+   - `cargo run -p jobchain-cli -- verify --input /tmp/jc-test/amend1.json --key /tmp/jc-test/example.com/public.key` → "VALID"
+   - `echo '{"end":"2025-12"}' | cargo run -p jobchain-cli -- amend --credential /tmp/jc-test/cred.json --chain /tmp/jc-test/amend1.json --domain example.com --key-dir /tmp/jc-test > /tmp/jc-test/amend2.json`
+   - Verify amend2.json links to amend1.json which links to cred.json.
+"""
+
+backup = "If the --chain flag adds too much complexity for the initial implementation, defer it and support only single-step amendments from a base credential (Amendment::from_credential only). Users can manually provide the last amendment as --credential and supply --original-hash to anchor back to the base — less ergonomic but functionally complete. If verify_chain() is not yet implemented or has issues, skip chain validation on input and just compute the predecessor hash from the last file in the chain. If the Amendment type cannot be verified by `jobchain verify` because verify only accepts VerifiableCredential, extend verify to also accept Amendment (they share the same proof structure and signing logic) — or add a --type amendment flag to verify."
+
+[context]
+files = [
+  "crates/jobchain-cli/Cargo.toml",
+  "crates/jobchain-cli/src/main.rs",
+  "crates/jobchain-cli/src/commands/mod.rs",
+  "crates/jobchain-cli/src/commands/amend.rs",
+  "crates/jobchain-cli/src/commands/issue.rs",
+  "crates/jobchain-cli/src/commands/init.rs",
+  "crates/jobchain-core/src/amendment.rs",
+  "crates/jobchain-core/src/credential.rs",
+  "crates/jobchain-core/src/signing.rs",
+  "crates/jobchain-core/src/did.rs",
+  "crates/jobchain-verify/src/lib.rs",
+  "Cargo.toml",
+]
+dependencies = ["jobchain-core", "jobchain-verify", "serde_json 1.x", "chrono 0.4", "clap 4.x", "dirs 6.x", "anyhow 1.x", "assert_cmd 2.x (dev)", "predicates 3.x (dev)"]

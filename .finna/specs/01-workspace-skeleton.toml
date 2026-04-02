@@ -1,0 +1,43 @@
+order = 1
+what = "Create a Cargo workspace with three crates (jobchain-core, jobchain-cli, jobchain-verify) and wire up inter-crate dependencies so `cargo check` passes on the empty skeleton"
+why = "Every subsequent step adds code into one of these three crates — core holds types, signing, DIDs, and the adapter trait; cli is the user-facing binary; verify is a standalone library (later compiled to WASM). Getting the workspace right first means every future step starts from a compiling baseline."
+
+how = """
+Step-by-step implementation plan:
+
+1. Create root Cargo.toml as a virtual workspace listing three members:
+   - jobchain-core
+   - jobchain-cli
+   - jobchain-verify
+   Define a [workspace.package] section with shared metadata (version = "0.1.0", edition = "2024", license = "MIT", authors).
+   Define a [workspace.dependencies] section reserving shared deps that later steps will add (serde, serde_json, ed25519-dalek, thiserror) — this keeps version pins in one place.
+
+2. Scaffold jobchain-core:
+   - crates/jobchain-core/Cargo.toml — lib crate, inherits workspace package metadata, no dependencies yet (just placeholders in comments).
+   - crates/jobchain-core/src/lib.rs — empty pub module, single-line doc comment ("Core types, signing, DIDs, and credential logic for jobchain").
+
+3. Scaffold jobchain-cli:
+   - crates/jobchain-cli/Cargo.toml — bin crate (name = "jobchain"), inherits workspace package metadata.
+   - Add dependency: jobchain-core = { path = "../jobchain-core" }.
+   - Reserve clap as a workspace dep for later.
+   - crates/jobchain-cli/src/main.rs — fn main() that prints "jobchain 0.1.0" and exits 0.
+
+4. Scaffold jobchain-verify:
+   - crates/jobchain-verify/Cargo.toml — lib crate, inherits workspace package metadata.
+   - Add dependency: jobchain-core = { path = "../jobchain-core" }.
+   - crates/jobchain-verify/src/lib.rs — empty pub module, single-line doc comment ("Signature and credential verification for jobchain").
+
+5. Run `cargo check --workspace` from the repo root — must compile cleanly with zero warnings.
+
+6. Run `cargo test --workspace` — must pass (no tests yet, but ensures the harness is wired).
+
+7. Add a root .gitignore with /target and Cargo.lock (lock checked in for the binary crate, but workspace-level ignore is fine until first release).
+
+8. `git init && git add -A && git commit` with the skeleton.
+"""
+
+backup = "If edition 2024 is not yet stable on the installed rustc, fall back to edition = '2021'. If virtual workspace package inheritance causes issues on older Cargo, inline the package metadata in each crate's Cargo.toml instead of using workspace = true."
+
+[context]
+files = ["Cargo.toml", "crates/jobchain-core/Cargo.toml", "crates/jobchain-core/src/lib.rs", "crates/jobchain-cli/Cargo.toml", "crates/jobchain-cli/src/main.rs", "crates/jobchain-verify/Cargo.toml", "crates/jobchain-verify/src/lib.rs", ".gitignore"]
+dependencies = ["rustc >= 1.85 (edition 2024 support)", "cargo"]

@@ -1,0 +1,124 @@
+order = 11
+what = "Implement the 'jobchain issue' CLI command that reads a jobl ExperienceItem (from JSON file or stdin), loads the issuer's keypair, signs it into a W3C VerifiableCredential, and outputs the signed credential JSON"
+why = "This is the command that produces the core artifact of the entire system: a signed employment credential. It wires together the credential structure (step 4), the signing logic (step 5), and the keypair loaded from disk (step 2/10) into a single CLI invocation. Without it, there is no way to actually issue a credential outside of test code. It also establishes the stdin/file input pattern and JSON output convention that the amend and verify commands will follow."
+
+how = """
+Step-by-step implementation plan:
+
+1. Create crates/jobchain-cli/src/commands/issue.rs and add `pub mod issue;` to commands/mod.rs.
+
+2. Define IssueArgs in commands/issue.rs:
+   - --input <path>: Option<PathBuf> — path to a JSON file containing a jobl ExperienceItem. If omitted, read from stdin. This supports both `jobchain issue --input experience.json` and `cat experience.json | jobchain issue`.
+   - --domain <domain>: String, required — the issuer's domain (e.g., "discourse.org"). Used to: (a) construct the did:web issuer URI, (b) locate the signing keypair at ~/.jobchain/<domain>/secret.key.
+   - --date <date>: Option<String> — issuance date as ISO 8601 (e.g., "2024-03-15"). If omitted, default to today's date (chrono::Utc::now().format("%Y-%m-%d")).
+   - --output <path>: Option<PathBuf> — if provided, write the signed credential JSON to this file. If omitted, write to stdout.
+   - --key-dir <path>: Option<PathBuf> — override the default ~/.jobchain/ base directory for locating the keypair. Same semantics as `jobchain init --key-dir`.
+
+3. Add the Issue(IssueArgs) variant to the Commands enum in main.rs:
+   - Commands::Issue(args) => commands::issue::run(args)
+
+4. Implement the issue command execution (pub fn run(args: IssueArgs) -> anyhow::Result<()>):
+
+   a. Read the ExperienceItem input:
+      - If args.input is Some(path): read the file to a string with std::fs::read_to_string(&path).
+      - If args.input is None: read stdin to a string with std::io::read_to_string(std::io::stdin()).
+      - Deserialize the string as a jobl::ExperienceItem using serde_json::from_str(). On parse failure, return a clear error: "Failed to parse experience entry: {serde error}. Expected a JSON object with fields: title, company, start, and optionally end, technologies, highlights."
+
+   b. Load the issuer keypair:
+      - Resolve key directory: base = args.key_dir.unwrap_or_else(|| dirs::home_dir().unwrap().join(".jobchain"))
+      - Secret key path = base.join(&args.domain).join("secret.key")
+      - If secret.key does not exist, return error: "No keypair found for domain '{domain}' at {path}. Run `jobchain init --domain {domain}` first."
+      - Load with jobchain_core::signing::Keypair::load(&secret_key_path).
+
+   c. Determine issuance date:
+      - If args.date is Some(d): use d directly (no validation beyond being a string — the VC spec allows any ISO 8601 date string).
+      - If args.date is None: use chrono::Utc::now().format("%Y-%m-%d").to_string().
+
+   d. Build the issuer DID:
+      - Construct the did:web URI from the domain using jobchain_core::did::domain_to_did(&args.domain) (the same function used in DID document generation, step 3). This handles port encoding (%3A) and path-to-colon conversion.
+
+   e. Construct and sign the credential:
+      - Call jobchain_core::credential::issue_credential(&issuer_did, experience, &issuance_date, &keypair).
+      - This returns a fully signed VerifiableCredential (proof attached, per step 5).
+
+   f. Serialize to JSON:
+      - Use serde_json::to_string_pretty(&credential) for human-readable output.
+      - The output includes @context, type, issuer, issuanceDate, credentialSubject (with flattened jobl fields), and proof.
+
+   g. Output the signed credential:
+      - If args.output is Some(path): write JSON to that file, print to stderr: "Credential written to {path}"
+      - If args.output is None: print JSON to stdout.
+      - In both cases, print a summary to stderr:
+        "Issued credential for {subject.company} ({subject.title})"
+        "  Issuer: {issuer_did}"
+        "  Date: {issuance_date}"
+
+5. Handle the stdin detection edge case:
+   - When reading from stdin and stdin is a TTY (not piped), print a hint to stderr before blocking: "Reading experience entry from stdin (paste JSON, then Ctrl+D)..."
+   - Use atty::is(atty::Stream::Stdin) or std::io::stdin().is_terminal() (Rust 1.70+ std) to detect this. Prefer the std approach to avoid an extra dependency.
+
+6. Write integration tests in crates/jobchain-cli/tests/issue.rs:
+
+   - test_issue_from_file:
+     Set up: run init to create a keypair in a tempdir, write a sample ExperienceItem JSON to a file.
+     Run: `jobchain issue --domain example.com --input experience.json --key-dir {tmpdir}`
+     Assert: stdout is valid JSON, parses as a VerifiableCredential, has proof with type Ed25519Signature2020, credentialSubject contains the input fields, issuer is "did:web:example.com".
+
+   - test_issue_from_stdin:
+     Set up: run init, prepare ExperienceItem JSON as piped input.
+     Run: pipe JSON into `jobchain issue --domain example.com --key-dir {tmpdir}`
+     Assert: same validation as test_issue_from_file.
+
+   - test_issue_custom_date:
+     Run: `jobchain issue --domain example.com --input exp.json --date 2024-06-01 --key-dir {tmpdir}`
+     Assert: issuanceDate in output is "2024-06-01".
+
+   - test_issue_default_date:
+     Run: issue without --date flag.
+     Assert: issuanceDate matches today's date (chrono::Utc::now().format("%Y-%m-%d")).
+
+   - test_issue_output_to_file:
+     Run: `jobchain issue --domain example.com --input exp.json --output cred.json --key-dir {tmpdir}`
+     Assert: cred.json exists and contains valid signed credential JSON.
+
+   - test_issue_missing_keypair:
+     Run: issue without running init first.
+     Assert: non-zero exit code, stderr contains "No keypair found" and "jobchain init".
+
+   - test_issue_invalid_json:
+     Run: pipe malformed JSON into jobchain issue.
+     Assert: non-zero exit code, stderr contains "Failed to parse".
+
+   - test_issue_roundtrip_verifiable:
+     Set up: run init, issue a credential, then extract the public key.
+     Assert: reconstruct the signing payload from the output credential, decode the proof signature, verify it against the public key using ed25519-dalek directly. This proves the full sign-then-verify contract works through the CLI.
+
+   Use assert_cmd for running the binary and predicates for assertion helpers.
+
+7. Sample ExperienceItem JSON for testing and documentation (embed in tests, also mention in stderr help):
+   {
+     "title": "Infrastructure Engineer",
+     "company": "Discourse",
+     "start": "2024-03",
+     "technologies": ["Ruby", "JavaScript", "Docker"],
+     "highlights": ["Led migration to containerized deployment"]
+   }
+
+8. Run `cargo test --workspace` and `cargo clippy --workspace` -- must pass clean.
+"""
+
+backup = "If jobl::ExperienceItem deserialization from JSON fails due to unexpected field names or formats, define a local InputExperience struct that mirrors the expected fields with flexible serde attributes, deserialize into that, then convert to jobl::ExperienceItem via From impl. If stdin detection via std::io::stdin().is_terminal() is not available on the target Rust version, add atty = '0.2' as a lightweight dependency. If issue_credential() from core does not exist yet or has a different signature than specced, inline the credential construction and signing in the CLI command as: VerifiableCredential::new() + credential.sign(&keypair, &verification_method)."
+
+[context]
+files = [
+  "crates/jobchain-cli/Cargo.toml",
+  "crates/jobchain-cli/src/main.rs",
+  "crates/jobchain-cli/src/commands/mod.rs",
+  "crates/jobchain-cli/src/commands/issue.rs",
+  "crates/jobchain-cli/src/commands/init.rs",
+  "crates/jobchain-core/src/credential.rs",
+  "crates/jobchain-core/src/signing.rs",
+  "crates/jobchain-core/src/did.rs",
+  "Cargo.toml",
+]
+dependencies = ["jobl 20251215", "serde_json 1.x", "chrono 0.4", "clap 4.x", "dirs 6.x", "anyhow 1.x", "assert_cmd 2.x (dev)", "predicates 3.x (dev)"]

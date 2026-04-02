@@ -1,0 +1,118 @@
+order = 9
+what = "Define the EmploymentAdapter trait in jobchain-core/src/adapter.rs with on_hire, on_title_change, and on_departure methods that return credential-ready data structures — no concrete implementations yet"
+why = "The credential and amendment types (steps 4, 8) know how to represent and sign employment data, but they have no opinion about where that data comes from. Real-world HRIS systems, CSV exports, REST APIs, and jobl resume files all structure employment events differently. The adapter trait defines a stable contract that maps any external source into the exact types the signing pipeline expects — VerifiableCredential for hires, Amendment for title changes and departures. Defining the trait now (before any concrete adapter) lets the CLI commands (steps 11-13) program against the interface, and lets third-party integrations plug in later without touching core."
+
+how = """
+Step-by-step implementation plan:
+
+1. Create crates/jobchain-core/src/adapter.rs and add `pub mod adapter;` to lib.rs.
+
+2. Define an AdapterError enum using thiserror for errors that adapters may surface:
+   - #[derive(Debug, thiserror::Error)]
+   - MissingField { field: String } — a required field was absent in the source data
+   - InvalidData { message: String } — the source data was present but malformed (bad date format, empty company name, etc.)
+   - SourceUnavailable { message: String } — the external system could not be reached or read
+   Adapters return Result<T, AdapterError> so callers get structured errors
+   they can match on, not opaque strings.
+
+3. Define a HireData struct — the output of on_hire, ready to become a VerifiableCredential:
+   - #[derive(Debug, Clone, PartialEq)]
+   - experience: jobl::ExperienceItem — the employment record to embed in credentialSubject
+   - issuer_did: String — the did:web URI of the issuing organization (e.g. "did:web:discourse.org")
+   - issuance_date: String — ISO 8601 date string for the credential's issuanceDate field
+   HireData carries exactly what VerifiableCredential::new() and issue_credential() need.
+   The adapter is responsible for mapping source-system fields into these values;
+   the core pipeline trusts the struct as-is and never re-parses source data.
+
+4. Define a TitleChangeData struct — the output of on_title_change, ready to become an Amendment:
+   - #[derive(Debug, Clone, PartialEq)]
+   - changes: serde_json::Map<String, serde_json::Value> — the amended fields, using the same
+     key names as CredentialSubject (e.g. "title", "highlights"). Must contain at least "title".
+   - effective_date: String — ISO 8601 date when the new title takes effect
+   - issuer_did: String — the did:web URI of the amending organization (must match the
+     original credential's issuer for now — cross-issuer amendments are a future extension)
+   TitleChangeData maps directly to Amendment::from_credential() or Amendment::from_amendment()
+   parameters, so the CLI just passes the fields through.
+
+5. Define a DepartureData struct — the output of on_departure, ready to become a final Amendment:
+   - #[derive(Debug, Clone, PartialEq)]
+   - end_date: String — ISO 8601 date of the employee's last day, becomes the "end" field
+     in the amendment's changes map
+   - effective_date: String — ISO 8601 date when the departure is recorded (often the same
+     as end_date, but may differ for retroactive entries)
+   - issuer_did: String — the did:web URI of the departing organization
+   - additional_changes: serde_json::Map<String, serde_json::Value> — optional extra fields
+     to amend alongside the departure (e.g. updated "highlights" summarizing final contributions).
+     May be empty.
+   DepartureData exists as a distinct type rather than reusing TitleChangeData because departure
+   is semantically different — it always sets an end date, signals credential finality, and
+   downstream consumers (verification UI, resume renderers) may treat it specially.
+
+6. Define the EmploymentAdapter trait:
+   - pub trait EmploymentAdapter {
+       /// The opaque source-specific identifier for an employment record.
+       /// For a jobl adapter this might be an index into the experience array;
+       /// for an HRIS API it might be an employee ID string.
+       type EmploymentId;
+
+       /// Extract hire data from the source system for a new employment record.
+       /// Called when issuing an initial credential.
+       fn on_hire(&self, id: &Self::EmploymentId) -> Result<HireData, AdapterError>;
+
+       /// Extract title-change data from the source system.
+       /// Called when amending an existing credential due to a title/role change.
+       fn on_title_change(&self, id: &Self::EmploymentId) -> Result<TitleChangeData, AdapterError>;
+
+       /// Extract departure data from the source system.
+       /// Called when amending an existing credential to record end of employment.
+       fn on_departure(&self, id: &Self::EmploymentId) -> Result<DepartureData, AdapterError>;
+   }
+   The trait is generic over EmploymentId so adapters can use whatever identifier
+   makes sense for their source system. All methods take &self (not &mut self) because
+   adapters are readers — they extract data, they don't mutate the source.
+
+7. Add convenience conversion methods on the data structs to connect them to the credential pipeline:
+   - impl HireData {
+       pub fn into_credential(self) -> crate::credential::VerifiableCredential
+       Calls VerifiableCredential::new(self.issuer_did, self.issuance_date, self.experience).
+     }
+   - impl TitleChangeData {
+       pub fn into_amendment_changes(self) -> (serde_json::Map<String, serde_json::Value>, String)
+       Returns (self.changes, self.effective_date) — the two values Amendment::from_credential()
+       and Amendment::from_amendment() need beyond the predecessor reference.
+     }
+   - impl DepartureData {
+       pub fn into_amendment_changes(self) -> (serde_json::Map<String, serde_json::Value>, String)
+       Merges {"end": self.end_date} into self.additional_changes and returns
+       (merged_changes, self.effective_date).
+     }
+   These are thin glue methods — they keep the adapter layer from knowing about
+   VerifiableCredential internals and keep the credential layer from knowing about adapters.
+
+8. Write unit tests in adapter.rs (#[cfg(test)] mod tests):
+   - test_hire_data_into_credential: construct a HireData with a sample ExperienceItem,
+     call into_credential(), assert the returned VerifiableCredential has matching issuer,
+     issuance_date, and credential_subject fields, with proof = None.
+   - test_title_change_data_into_changes: construct a TitleChangeData with title and highlights
+     changes, call into_amendment_changes(), assert the returned map has the expected keys
+     and the effective_date is passed through.
+   - test_departure_data_into_changes_includes_end: construct a DepartureData with end_date
+     and empty additional_changes, call into_amendment_changes(), assert the returned map
+     contains an "end" key with the end_date value.
+   - test_departure_data_merges_additional: construct a DepartureData with end_date and
+     additional_changes containing "highlights", call into_amendment_changes(), assert the
+     returned map contains both "end" and "highlights".
+   - test_adapter_error_display: construct each AdapterError variant, call .to_string(),
+     assert the messages are human-readable and include the relevant field/message.
+
+   Note: no tests for trait implementations — there are no concrete adapters yet.
+   The tests here validate the data structs and their conversion methods.
+
+9. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+"""
+
+backup = "If the associated type EmploymentId proves awkward for dynamic dispatch (trait objects require Sized associated types or workarounds), replace it with a concrete String identifier and let adapters parse it internally. If jobl::ExperienceItem turns out to be inconvenient as a direct field on HireData (e.g. constructing one from an HRIS API is cumbersome), replace it with a builder-pattern HireDataBuilder that constructs the ExperienceItem field-by-field and validates on build(). If serde_json::Map is too loose for TitleChangeData.changes and callers pass invalid keys, add a validate_keys() method that checks the keys against the known CredentialSubject field names."
+
+[context]
+files = ["crates/jobchain-core/src/adapter.rs", "crates/jobchain-core/src/lib.rs", "crates/jobchain-core/src/credential.rs", "crates/jobchain-core/src/amendment.rs"]
+dependencies = ["jobl 20251215", "serde_json 1.x", "thiserror 2.x"]

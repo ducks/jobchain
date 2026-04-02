@@ -1,0 +1,11 @@
+Written to `.finna/specs/14-cli-wallet.toml`. The spec covers:
+
+- **WASM build target** for jobchain-verify with `wasm-bindgen` behind a `"wasm"` feature flag
+- **`jobchain wallet build` subcommand** with `--dir`, `--out`, `--title`, `--base-url`, `--wasm-path`, `--force`, `--no-verify` flags
+- **Input scanning** — discovers `.vc.json`, `.amend.json`, and `resume.jobl`, groups amendments by their parent credential via content hash
+- **Inline HTML templates** — index page with credential cards, individual detail pages with amendment timelines, dark/light mode CSS, zero external dependencies
+- **In-browser WASM verification** — lazy-loads the module on "Verify Signature" click, reads credential JSON from an embedded `<script type="application/json">` tag
+- **`index.json` manifest** — machine-readable credential list for ATS consumption with optional absolute URLs via `--base-url`
+- **Graceful degradation** — if WASM isn't built, generates the site without verify buttons and prints a warning
+- **11 integration tests** covering basic build, amendments, resume, empty dirs, force overwrite, JSON structure, base URLs, HTML content, WASM absence, and full end-to-end roundtrip
+- **Backup plan** — ship without WASM first if toolchain issues arise; swap to askama if inline templates get unwieldy; use wasm-opt if binary is too large

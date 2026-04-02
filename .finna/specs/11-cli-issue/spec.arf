@@ -1,0 +1,9 @@
+Written `11-cli-issue.toml`. The spec covers:
+
+- **Input**: JSON ExperienceItem from `--input` file or stdin (with TTY detection hint)
+- **Key loading**: Resolves `~/.jobchain/<domain>/secret.key` (same layout as `init`)
+- **Signing**: Delegates to `issue_credential()` from core (step 5)
+- **Output**: Pretty-printed signed VC JSON to `--output` file or stdout, summary to stderr
+- **Flags**: `--domain` (required), `--input`, `--date`, `--output`, `--key-dir`
+- **8 integration tests** covering file input, stdin pipe, custom/default date, output-to-file, missing keypair, invalid JSON, and a full sign-then-verify roundtrip
+- **Backup**: Local input struct fallback, atty fallback, inline signing fallback

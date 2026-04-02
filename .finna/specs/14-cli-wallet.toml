@@ -1,0 +1,317 @@
+order = 14
+what = "Implement 'jobchain wallet' CLI command — a static-site generator that reads a directory of signed .vc.json credentials (plus optional amendments and resume.jobl), produces an HTML folder with a manifest, individual credential pages, and inline WASM-based Ed25519 verification"
+why = "Everything built so far (init, issue, verify, amend) operates in a terminal. The wallet command turns signed credentials into something a holder can actually share — a deployable static site where hiring managers and ATS tools can browse, verify, and machine-read employment history. The HTML pages embed a WASM module compiled from jobchain-verify, so visitors can verify signatures in-browser without trusting the hosting server. This is the holder-facing payoff: a portable, self-verifying credential portfolio that works on GitHub Pages, Netlify, or any static host. It also produces index.json as the machine-readable entry point for automated ATS consumption, closing the issuer→holder→verifier loop end-to-end."
+
+how = """
+Step-by-step implementation plan:
+
+1. Add a wasm build target for jobchain-verify:
+   - Create crates/jobchain-verify/src/wasm.rs with #[cfg(target_arch = "wasm32")] gated bindings.
+   - Expose a single entry point: verify_credential_json(credential_json: &str, public_key_hex: &str) -> JsValue
+     that deserializes the credential JSON, decodes the hex public key to [u8; 32], calls
+     verify_credential(), and returns a JSON result {valid: bool, error: string|null}.
+   - Add wasm-bindgen = "0.2" and serde-wasm-bindgen = "0.6" as optional dependencies to
+     crates/jobchain-verify/Cargo.toml behind a "wasm" feature flag:
+     [features]
+     wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+   - Add [lib] crate-type = ["cdylib", "rlib"] to jobchain-verify's Cargo.toml (cdylib needed
+     for wasm-pack, rlib for normal Rust consumption).
+   - Add a wasm-build script or Makefile target:
+     wasm-pack build crates/jobchain-verify --target web --features wasm --out-dir ../../target/wasm-pkg
+     This produces jobchain_verify_bg.wasm + jobchain_verify.js (ES module glue).
+   - The WASM module should be small — jobchain-verify has minimal dependencies (ed25519-dalek,
+     bs58, serde_json, thiserror). No reqwest/tokio/network code compiled into WASM.
+
+2. Create crates/jobchain-cli/src/commands/wallet.rs and add `pub mod wallet;` to commands/mod.rs.
+
+3. Define WalletArgs in commands/wallet.rs using clap subcommands for the wallet namespace:
+   - jobchain wallet build is the primary subcommand. Define WalletCommands enum:
+     enum WalletCommands {
+         Build(WalletBuildArgs),
+     }
+   - WalletBuildArgs fields:
+     --dir <path>: PathBuf, required — input directory containing .vc.json files, optional
+       amendment .amend.json files, and optional resume.jobl.
+     --out <path>: PathBuf, required — output directory for the generated static site. Created
+       if it doesn't exist. Must be empty or use --force.
+     --title <string>: Option<String> — page title / holder name for the site header. Defaults
+       to "Credential Wallet" if not provided.
+     --base-url <string>: Option<String> — base URL for canonical links in index.json (e.g.
+       "https://jake.dev/credentials"). If omitted, uses relative paths.
+     --wasm-path <path>: Option<PathBuf> — path to a pre-built WASM pkg directory. If omitted,
+       the command attempts to locate one at target/wasm-pkg/ relative to the workspace root,
+       or falls back to embedding a pre-compiled WASM blob from the build.
+     --force: bool, default false — allow overwriting an existing output directory.
+     --no-verify: bool, default false — skip local signature verification of credentials during
+       build. By default, the wallet builder verifies each credential before including it and
+       warns (but does not fail) if verification fails without a local key.
+   - Add Wallet(WalletArgs) variant to Commands enum in main.rs.
+
+4. Define the input scanning logic — pub fn scan_credentials(dir: &Path) -> anyhow::Result<WalletInput>:
+
+   a. Walk the --dir directory (non-recursive, flat directory):
+      - Collect all *.vc.json files as credential paths.
+      - Collect all *.amend.json files as amendment paths.
+      - Look for exactly one resume.jobl file (optional).
+      - Ignore all other files silently.
+
+   b. For each .vc.json file:
+      - Read and deserialize as VerifiableCredential.
+      - Extract metadata: issuer DID, issuance_date, credential_subject (title, company).
+      - Compute the content hash (sha256) for amendment chain linkage.
+
+   c. For each .amend.json file:
+      - Read and deserialize as Amendment.
+      - Extract the originalCredential hash to link it to its base credential.
+      - Group amendments by their original credential, ordered by issuance_date.
+
+   d. Build a WalletInput struct:
+      struct WalletInput {
+          credentials: Vec<CredentialEntry>,
+          resume: Option<PathBuf>,
+      }
+      struct CredentialEntry {
+          credential: VerifiableCredential,
+          source_path: PathBuf,
+          content_hash: String,
+          amendments: Vec<Amendment>,
+          slug: String,  // URL-safe filename derived from company-startdate
+      }
+      Sort credentials by issuance_date descending (most recent first).
+
+5. Define the HTML template system — use inline Rust string templates (no template engine dependency):
+
+   a. Create a templates module in wallet.rs (or a separate crates/jobchain-cli/src/templates/ module)
+      with functions that return String:
+      - render_index(title: &str, credentials: &[CredentialEntry], has_resume: bool) -> String
+      - render_credential_page(entry: &CredentialEntry, title: &str) -> String
+      - render_style() -> String — shared CSS, returned as a <style> block
+
+   b. The index page (index.html) contains:
+      - Page title and optional holder name.
+      - A card list of credentials, each showing: company, title, date range, issuer DID,
+        verification status indicator (a colored dot: green/yellow/red with "Verified"/
+        "Unverified"/"Invalid" text).
+      - Each card links to the credential's detail page ({slug}.html).
+      - A "Verify All" button that triggers in-browser WASM verification of all credentials.
+      - A link to index.json for machine consumers.
+      - If resume.jobl exists, a section or link for the self-authored resume.
+      - Footer with "Verified with jobchain" and a link to the project.
+
+   c. Each credential detail page ({slug}.html) contains:
+      - Full credential metadata: issuer, subject fields, issuance date, proof details.
+      - If amendments exist, a timeline/history section showing the amendment chain
+        (each amendment's changes and effective date).
+      - A "Verify Signature" button that loads the WASM module and runs verification.
+        The button needs the issuer's public key — embed the DID URI and verification_method
+        so the WASM module can be called with the credential JSON. For offline verification,
+        the page includes the credential JSON inline in a <script type="application/json"> tag.
+      - Raw JSON view (collapsible <details> element showing the pretty-printed credential JSON).
+      - Navigation back to the index.
+
+   d. CSS styling (render_style):
+      - Minimal, clean design. System font stack. Max-width content container.
+      - Light/dark mode via prefers-color-scheme media query.
+      - No external resources (no CDN links, no Google Fonts) — everything inline for
+        offline operation and privacy.
+      - Card layout for credential list. Timeline layout for amendments.
+
+6. Define the WASM integration for in-browser verification:
+
+   a. The generated site includes these WASM assets in an assets/ subdirectory:
+      - assets/jobchain_verify_bg.wasm — the compiled verification module.
+      - assets/jobchain_verify.js — the wasm-bindgen generated JS glue (ES module).
+
+   b. Each HTML page includes a <script type="module"> block that:
+      - Lazily loads the WASM module only when the user clicks "Verify Signature".
+      - Reads the credential JSON from the inline <script type="application/json"> tag.
+      - Calls the verify function with the credential JSON and the public key.
+      - Updates the verification status indicator in the DOM (green check / red X).
+      - For "Verify All" on the index page: iterates over all credential JSON blobs
+        embedded in the page (or fetched from the individual .vc.json files in the
+        output directory).
+
+   c. The verification flow in browser:
+      - User clicks "Verify" → JS loads WASM (first time only, cached after) →
+        calls verify_credential_json(json, pubkey_hex) → displays result.
+      - The public key must be provided. Two strategies:
+        (1) Embed the public key hex in a data attribute on the verify button if
+            the key was available at build time (from --key-dir or the credential's
+            proof.verificationMethod parsed against a local DID doc).
+        (2) If no local key, prompt the user to paste a public key hex string, or
+            display a message: "To verify, the issuer's DID document must be resolved.
+            Paste the issuer's public key (hex) or visit {did_web_url} to find it."
+        Strategy (1) is preferred when keys are available at build time.
+
+7. Generate the machine-readable manifest — index.json:
+
+   a. Structure:
+      {
+        "@context": ["https://www.w3.org/2018/credentials/v1"],
+        "type": "CredentialWallet",
+        "holder": "{title or holder name}",
+        "credentials": [
+          {
+            "id": "{slug}",
+            "type": ["VerifiableCredential", "EmploymentCredential"],
+            "issuer": "did:web:discourse.org",
+            "issuanceDate": "2024-03-15",
+            "credentialSubject": {
+              "title": "Infrastructure Engineer",
+              "company": "Discourse"
+            },
+            "credentialUrl": "{base_url}/{slug}.vc.json",
+            "pageUrl": "{base_url}/{slug}.html",
+            "amendments": [
+              {
+                "effectiveDate": "2025-06-15",
+                "changes": {"title": "Senior Infrastructure Engineer"}
+              }
+            ]
+          }
+        ],
+        "resume": "{base_url}/resume.jobl" | null,
+        "generatedAt": "2026-04-02T12:00:00Z"
+      }
+
+   b. If --base-url is set, URLs are absolute. If omitted, URLs are relative paths
+      (e.g. "discourse-2024.vc.json").
+
+8. Implement the build command execution (pub fn run(args: WalletArgs) -> anyhow::Result<()>):
+
+   a. Match on WalletCommands::Build(build_args).
+
+   b. Validate the input directory exists and is a directory.
+
+   c. Validate the output directory:
+      - If it exists and is non-empty and --force is not set, error:
+        "Output directory {path} is not empty. Use --force to overwrite."
+      - If --force is set, remove existing contents (but warn on stderr).
+      - If it doesn't exist, create it with create_dir_all.
+
+   d. Locate WASM assets:
+      - Check args.wasm_path if provided.
+      - Else check target/wasm-pkg/ relative to the Cargo workspace root.
+      - If not found, print a warning: "WASM verification module not found. Run
+        'wasm-pack build crates/jobchain-verify --target web --features wasm'
+        to enable in-browser verification. Generating site without verify buttons."
+      - Set a has_wasm: bool flag for the template renderer.
+
+   e. Scan credentials with scan_credentials(&build_args.dir).
+      - Print to stderr: "Found {n} credentials, {m} amendments"
+
+   f. Optionally verify credentials locally (unless --no-verify):
+      - For each credential, if a local public key is discoverable (check
+        ~/.jobchain/{issuer_domain}/public.key), run verify_credential().
+      - Print pass/fail to stderr for each. Do not fail the build on verification
+        failure — just annotate the credential entry with its verification status.
+
+   g. Generate output files:
+      - Write index.html using render_index().
+      - Write index.json using the manifest structure.
+      - For each credential: write {slug}.html using render_credential_page().
+      - Copy each .vc.json and .amend.json file to the output directory (so they're
+        directly fetchable for machine consumption).
+      - If resume.jobl exists, copy it to the output directory.
+      - If has_wasm, create assets/ directory and copy the .wasm and .js files.
+      - Print to stderr:
+        "Wallet generated: {out_path}/"
+        "  {n} credential pages"
+        "  index.html + index.json"
+        "  {wasm status: 'with' or 'without'} in-browser verification"
+        "  Deploy to any static host: cp -r {out_path}/ your-server/"
+
+9. Add the Wallet(WalletArgs) variant to Commands enum in main.rs:
+   - Commands::Wallet(args) => commands::wallet::run(args)
+
+10. Write integration tests in crates/jobchain-cli/tests/wallet.rs:
+
+    - test_wallet_build_basic:
+      Set up: create a tempdir with two .vc.json files (use jobchain init + issue to produce
+      them, or construct valid signed credentials programmatically in the test).
+      Run: `jobchain wallet build --dir {input_dir} --out {output_dir} --title "Test Wallet"`
+      Assert: exit code 0, output_dir contains index.html, index.json, two {slug}.html files,
+      two .vc.json files copied.
+
+    - test_wallet_build_with_amendments:
+      Set up: create a credential and an amendment for it.
+      Run: wallet build.
+      Assert: the credential's detail page HTML contains amendment information, index.json
+      includes the amendment in the credential entry.
+
+    - test_wallet_build_with_resume:
+      Set up: create a credential dir with a resume.jobl file.
+      Run: wallet build.
+      Assert: resume.jobl is copied to output, index.html contains a resume link,
+      index.json has a non-null "resume" field.
+
+    - test_wallet_build_empty_dir:
+      Run: wallet build with an empty input dir.
+      Assert: exit code 0 (not an error — just an empty wallet), index.html and index.json
+      are generated with zero credentials.
+
+    - test_wallet_build_output_exists_no_force:
+      Set up: create a non-empty output dir.
+      Run: wallet build without --force.
+      Assert: exit code non-zero, stderr mentions "not empty" and "--force".
+
+    - test_wallet_build_output_exists_force:
+      Set up: create a non-empty output dir.
+      Run: wallet build with --force.
+      Assert: exit code 0, output is overwritten.
+
+    - test_wallet_index_json_structure:
+      Run: wallet build, read the generated index.json.
+      Assert: parses as valid JSON, has @context, type, credentials array, generatedAt field.
+      Each credential entry has id, issuer, issuanceDate, credentialSubject with title+company.
+
+    - test_wallet_index_json_base_url:
+      Run: wallet build with --base-url "https://jake.dev/creds".
+      Assert: index.json credential URLs are absolute, starting with the base URL.
+
+    - test_wallet_html_contains_credential_data:
+      Run: wallet build, read a generated {slug}.html file.
+      Assert: HTML contains the credential's title, company, issuer DID, issuance date.
+      Assert: HTML contains a <script type="application/json"> block with the credential JSON.
+
+    - test_wallet_no_wasm_warning:
+      Run: wallet build without WASM assets available.
+      Assert: stderr contains "WASM verification module not found", site is generated
+      without verify buttons (HTML does not contain "Verify Signature").
+
+    - test_wallet_build_roundtrip:
+      Full end-to-end: init → issue two credentials → amend one → wallet build → verify
+      the generated index.json contains both credentials and the amendment.
+
+    Use assert_cmd and predicates (same as other CLI test files).
+
+11. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+
+12. Verify the end-to-end flow manually:
+    - mkdir /tmp/jc-wallet-test && cd /tmp/jc-wallet-test
+    - cargo run -p jobchain-cli -- init --org "Test Corp" --domain example.com --key-dir /tmp/jc-keys
+    - echo '{"title":"Engineer","company":"Test Corp","start":"2024-01"}' | cargo run -p jobchain-cli -- issue --domain example.com --key-dir /tmp/jc-keys > creds/example-2024.vc.json
+    - echo '{"title":"Senior Engineer","company":"Test Corp","start":"2022-06"}' | cargo run -p jobchain-cli -- issue --domain example.com --key-dir /tmp/jc-keys > creds/example-2022.vc.json
+    - cargo run -p jobchain-cli -- wallet build --dir creds/ --out site/ --title "Jake's Credentials"
+    - Open site/index.html in a browser, verify it renders credential cards.
+    - Inspect site/index.json with jq, verify structure.
+    - If WASM was built: click "Verify Signature" on a credential page, confirm it works.
+"""
+
+backup = "If wasm-pack or wasm-bindgen compilation proves difficult (toolchain issues, dependency incompatibilities with wasm32 target), ship the wallet without in-browser verification first — generate the HTML pages and index.json but omit verify buttons, and add a note like 'Verify with: jobchain verify <credential.json>'. Add WASM verification as a fast follow once the build is stable. If the inline HTML templates become unwieldy, introduce a lightweight template engine like askama (compile-time templates) — it adds a build-dep but keeps templates as separate files. If the WASM binary is too large (>500KB), investigate wasm-opt for size optimization, or strip unnecessary features from ed25519-dalek (disable batch verification, use the 'u32_backend' feature for smaller code). If resume.jobl parsing is complex (jobl crate's types are hard to render), treat resume.jobl as an opaque file that is copied and linked but not rendered inline — defer jobl rendering to a future step."
+
+[context]
+files = [
+  "crates/jobchain-cli/Cargo.toml",
+  "crates/jobchain-cli/src/main.rs",
+  "crates/jobchain-cli/src/commands/mod.rs",
+  "crates/jobchain-cli/src/commands/wallet.rs",
+  "crates/jobchain-verify/Cargo.toml",
+  "crates/jobchain-verify/src/lib.rs",
+  "crates/jobchain-verify/src/wasm.rs",
+  "crates/jobchain-core/src/credential.rs",
+  "crates/jobchain-core/src/amendment.rs",
+  "Cargo.toml",
+  "PLAN.md",
+]
+dependencies = ["wasm-bindgen 0.2 (optional, verify crate)", "serde-wasm-bindgen 0.6 (optional, verify crate)", "wasm-pack (build tool)", "jobchain-core", "jobchain-verify", "clap 4.x", "serde_json 1.x", "anyhow 1.x", "chrono 0.4 (for generatedAt timestamp)", "sha2 0.10 (for content hashing)", "assert_cmd 2.x (dev)", "predicates 3.x (dev)"]

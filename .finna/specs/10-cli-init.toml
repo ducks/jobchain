@@ -1,0 +1,131 @@
+order = 10
+what = "Implement the 'jobchain init' CLI command that generates an Ed25519 keypair, writes keys to ~/.jobchain/<domain>/, and outputs a did:web DID document to stdout or a file"
+why = "This is the first user-facing entry point into the system. Before an org can issue any credentials, they need a signing identity: a keypair on disk and a DID document to host. This command wires together the keypair generation (step 2) and DID document generation (step 3) behind a single CLI invocation, making the system usable end-to-end for the first time. It also establishes the on-disk layout (~/.jobchain/) that all subsequent commands (issue, amend, verify) will expect when loading the issuer's signing key."
+
+how = """
+Step-by-step implementation plan:
+
+1. Add clap dependency to crates/jobchain-cli/Cargo.toml:
+   - clap = { version = "4", features = ["derive"] } via workspace deps.
+   - Add dirs = "6" to workspace deps and wire to jobchain-cli (for resolving ~/.jobchain/ cross-platform via dirs::home_dir()).
+
+2. Create crates/jobchain-cli/src/commands/ module structure:
+   - crates/jobchain-cli/src/commands/mod.rs — declare `pub mod init;`
+   - crates/jobchain-cli/src/commands/init.rs — the init command implementation.
+   - Update main.rs to declare `mod commands;` and wire clap subcommands.
+
+3. Define the top-level CLI struct in main.rs using clap derive:
+   - #[derive(Parser)] struct Cli with #[command(subcommand)] field.
+   - enum Commands with Init(InitArgs) variant.
+   - This structure supports adding Issue, Verify, etc. as variants later without refactoring.
+
+4. Define InitArgs in commands/init.rs:
+   - --org <name>: String, required — the organization name (e.g., "Discourse"). Used in DID document metadata but not in the DID URI itself.
+   - --domain <domain>: String, required — the domain for did:web resolution (e.g., "discourse.org"). Becomes the DID URI and determines the key storage directory name.
+   - --output <path>: Option<PathBuf>, optional — if provided, write the DID document to this file path instead of stdout. Useful for piping directly to .well-known/did.json.
+   - --force: bool, default false — if set, overwrite an existing keypair for this domain. Without this flag, refuse to overwrite and exit with an error explaining the existing keys.
+   - --key-dir <path>: Option<PathBuf>, optional — override the default ~/.jobchain/ base directory. Useful for testing and non-standard setups. Default: ~/.jobchain/.
+
+5. Implement the init command execution (pub fn run(args: InitArgs) -> Result<(), CliError>):
+
+   a. Resolve the key directory:
+      - Base = args.key_dir.unwrap_or_else(|| dirs::home_dir().unwrap().join(".jobchain"))
+      - Domain dir = base.join(&args.domain)  (e.g., ~/.jobchain/discourse.org/)
+      - Secret key path = domain_dir.join("secret.key")
+      - Public key path = domain_dir.join("public.key")
+
+   b. Check for existing keys:
+      - If secret.key exists and --force is not set, print an error to stderr:
+        "Keypair already exists for {domain} at {path}. Use --force to overwrite."
+        Exit with non-zero status.
+      - If --force is set or no existing keys, proceed.
+
+   c. Create the directory:
+      - std::fs::create_dir_all(&domain_dir) — create ~/.jobchain/<domain>/ recursively.
+      - Set directory permissions to 0o700 (owner-only access) on Unix via std::os::unix::fs::PermissionsExt.
+
+   d. Generate the keypair:
+      - Call jobchain_core::signing::Keypair::generate().
+      - On error, print a clear message and exit.
+
+   e. Save keys to disk:
+      - Call keypair.save(&secret_key_path) — writes 32-byte seed with 0o600 permissions.
+      - Call keypair.save_public_key(&public_key_path) — writes 32-byte public key.
+      - Print to stderr: "Keypair written to {domain_dir}"
+
+   f. Generate the DID document:
+      - Call jobchain_core::did::generate_did_document(&args.domain, &keypair.public_key_bytes()).
+      - Serialize with did_document_to_json().
+
+   g. Output the DID document:
+      - If --output is Some(path): write JSON to that file, print to stderr: "DID document written to {path}"
+      - If --output is None: print JSON to stdout (so it can be piped: `jobchain init ... > did.json`)
+      - In both cases, print a human-friendly summary to stderr:
+        "Initialized jobchain identity for {org}"
+        "  DID: did:web:{domain}"
+        "  Keys: {domain_dir}/"
+        "  Next: host the DID document at https://{domain}/.well-known/did.json"
+
+6. Define a CliError enum in commands/mod.rs (or a shared error module):
+   - Signing(#[from] jobchain_core::signing::SigningError)
+   - Did(#[from] jobchain_core::did::DidError)
+   - Io(#[from] std::io::Error)
+   - AlreadyExists(String) — keypair already exists for this domain
+   Implement Display for user-friendly error messages.
+   Implement std::process::Termination or use anyhow/miette for error reporting in main.
+   Prefer anyhow = "1" for CLI error handling (add to workspace deps) — it gives good error chains without boilerplate.
+
+7. Wire everything in main.rs:
+   - Parse CLI args with Cli::parse().
+   - Match on Commands::Init(args) => commands::init::run(args).
+   - On error, print to stderr and exit with code 1.
+   - Use anyhow::Result as the return type for main().
+
+8. Write integration tests in crates/jobchain-cli/tests/init.rs:
+   - test_init_creates_keypair:
+     Run init with --key-dir set to a tempdir, assert:
+     - secret.key exists and is 32 bytes
+     - public.key exists and is 32 bytes
+     - Directory permissions are 0o700 (Unix)
+     - secret.key permissions are 0o600 (Unix)
+   - test_init_outputs_did_document:
+     Capture stdout, parse as JSON, assert:
+     - has @context array
+     - id matches "did:web:{domain}"
+     - verificationMethod has one entry with correct type
+     - publicKeyMultibase starts with 'z'
+   - test_init_refuses_overwrite:
+     Run init twice with same domain, assert second run fails with non-zero exit and stderr mentions "already exists".
+   - test_init_force_overwrites:
+     Run init twice with --force on second run, assert second run succeeds and keys are different (new keypair generated).
+   - test_init_output_to_file:
+     Run init with --output flag pointing to a tempfile, assert file contains valid DID document JSON.
+   - test_init_stderr_summary:
+     Capture stderr, assert it contains the DID URI, key directory path, and the "Next: host" hint.
+
+   Use assert_cmd + predicates crates for integration testing the CLI binary:
+   - Add assert_cmd = "2" and predicates = "3" to workspace dev-dependencies.
+
+9. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+
+10. Verify the end-to-end flow manually:
+    - `cargo run -p jobchain-cli -- init --org "Test Corp" --domain example.com --key-dir /tmp/jobchain-test`
+    - Inspect the output DID document.
+    - Inspect the generated files in /tmp/jobchain-test/example.com/.
+    - Pipe to jq: `cargo run -p jobchain-cli -- init --org "Test" --domain test.dev --key-dir /tmp/jc | jq .`
+"""
+
+backup = "If dirs crate causes issues, use std::env::var('HOME') directly with a cfg(unix) guard and std::env::var('USERPROFILE') for Windows. If clap derive macro causes slow compilation, use the builder API instead. If assert_cmd integration tests are flaky, write unit tests for the init logic by extracting it into a testable function that takes an output writer instead of using stdout directly."
+
+[context]
+files = [
+  "crates/jobchain-cli/Cargo.toml",
+  "crates/jobchain-cli/src/main.rs",
+  "crates/jobchain-cli/src/commands/mod.rs",
+  "crates/jobchain-cli/src/commands/init.rs",
+  "crates/jobchain-core/src/signing.rs",
+  "crates/jobchain-core/src/did.rs",
+  "crates/jobchain-core/src/lib.rs",
+  "Cargo.toml",
+]
+dependencies = ["clap 4.x", "dirs 6.x", "anyhow 1.x", "assert_cmd 2.x (dev)", "predicates 3.x (dev)"]

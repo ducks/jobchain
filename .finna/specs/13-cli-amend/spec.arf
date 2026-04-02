@@ -1,0 +1,8 @@
+Spec written to `.finna/specs/13-cli-amend.toml`. Key design decisions:
+
+- **`--credential` is always a file path** (not stdin) because the patch also needs an input source — avoids the two-stdin problem
+- **`--patch` supports file or stdin** — same pattern as issue/verify for the primary data input
+- **`--chain` flag** for multi-amendment chains — pass prior amendments in order, the command validates chain integrity before extending it
+- **Issuer match validation** — the command refuses to amend a credential issued by a different DID than the one implied by `--domain`
+- **`--effective-date` vs `issuance_date`** — effective date is when the change takes effect (user-specified), issuance date is when the amendment was signed (automatic)
+- **Backup plan** defers `--chain` if it adds too much initial complexity, and notes that `jobchain verify` may need to accept Amendment types alongside VerifiableCredential

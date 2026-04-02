@@ -1,0 +1,9 @@
+Written to `.finna/specs/12-cli-verify.toml`. The spec covers:
+
+- **CLI args**: `--input` (file or stdin), `--key` (offline public key), `--offline` (explicit no-network), `--json` (machine-readable output)
+- **Two verification paths**: local key file (offline) or DID resolution over HTTPS (default)
+- **DID resolution flow**: extract `verificationMethod` from proof → `resolve_did_web_blocking()` → `extract_verification_key_by_id()` with fallback to first Ed25519 key
+- **Output**: human-readable pass/fail with credential summary, or structured JSON with `--json`
+- **Exit codes**: 0 for valid, 1 for invalid
+- **10 integration tests** covering valid/invalid/tampered/wrong-key/stdin/JSON-output/offline/roundtrip scenarios
+- **Backup**: offline-only first pass if resolution adds too much complexity

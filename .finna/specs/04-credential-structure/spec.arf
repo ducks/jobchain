@@ -1,0 +1,7 @@
+Spec written to `.finna/specs/04-credential-structure.toml`. Key design decisions:
+
+- **CredentialSubject uses `#[serde(flatten)]`** on the jobl `ExperienceItem` so its fields appear as top-level JSON properties in `credentialSubject`, matching the PLAN.md examples
+- **Proof is `Option<Proof>`** — `None` before signing, `Some` after, skipped from serialization when absent
+- **`signing_payload()`** method strips the proof and produces canonical JSON bytes, giving step 5 (credential-signing) a clean interface to sign against
+- **All serde renames** map Rust snake_case to the W3C camelCase (`issuanceDate`, `credentialSubject`, `verificationMethod`, `proofValue`, `@context`)
+- **Fallback**: if `#[serde(flatten)]` conflicts with the `type` field on `CredentialSubject`, nest under a named key instead

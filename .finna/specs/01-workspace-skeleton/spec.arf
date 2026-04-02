@@ -1,0 +1,9 @@
+Spec written to `.finna/specs/01-workspace-skeleton.toml`. 
+
+Key decisions:
+- **Crates live under `crates/`** — keeps root clean as more crates may come later (adapters, WASM target)
+- **Virtual workspace** with `[workspace.package]` inheritance so version/edition/license are defined once
+- **`[workspace.dependencies]`** reserves shared deps (serde, ed25519-dalek, etc.) even though they're not added yet — later steps just flip them on
+- **Edition 2024** with a fallback to 2021 if rustc is too old
+- **cli crate produces a binary named `jobchain`**, not `jobchain-cli`
+- Both `jobchain-cli` and `jobchain-verify` depend on `jobchain-core` via path; verify does *not* depend on cli

@@ -1,0 +1,9 @@
+Spec written to `.finna/specs/03-did-web-document.toml`. 
+
+Key design decisions in this spec:
+
+- **Accepts raw `[u8; 32]` not `Keypair`** — the `generate_did_document` function takes raw public key bytes so it works in verification/resolution contexts where you don't have the private key, keeping `did.rs` decoupled from `signing.rs`.
+- **Multicodec header** — prepends `0xed 0x01` (ed25519-pub multicodec) before base58btc encoding, per the Ed25519VerificationKey2020 spec.
+- **`domain_to_did` handles the full did:web spec** — ports get `%3A`-encoded, paths become colon-separated segments.
+- **bs58 crate** for base58btc — standard Rust choice, with a manual fallback in the backup plan.
+- **Pretty JSON output** — since `did.json` is a file humans host and inspect at `.well-known/did.json`.

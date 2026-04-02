@@ -1,0 +1,8 @@
+Written to `.finna/specs/09-adapter-trait.toml`. Key design decisions:
+
+- **Three data structs** (`HireData`, `TitleChangeData`, `DepartureData`) map 1:1 to the three trait methods and carry exactly the fields the credential/amendment pipeline needs — no more, no less
+- **Associated type `EmploymentId`** keeps the trait generic over how different source systems identify records (index, UUID, employee ID string, etc.)
+- **`&self` methods** — adapters are pure readers, no mutation
+- **`DepartureData` is distinct from `TitleChangeData`** because departures always set an `end` date and signal credential finality, which downstream consumers may treat differently
+- **Thin `into_*` conversion methods** on each data struct bridge to `VerifiableCredential::new()` and `Amendment::from_credential()` without either layer knowing the other's internals
+- **`AdapterError`** with `MissingField`, `InvalidData`, `SourceUnavailable` variants gives callers structured errors to match on

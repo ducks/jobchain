@@ -1,0 +1,61 @@
+order = 2
+what = "Implement Ed25519 keypair generation, PEM serialization (load/save), and public key derivation in jobchain-core/src/signing.rs using ed25519-dalek"
+why = "Every downstream operation — issuing credentials, building did.json, verifying signatures — depends on having a keypair. This step establishes the signing primitives that `jobchain init` will call and that the verification library will use to check proofs. Getting serialization right now (PEM/PKCS8 on disk, raw bytes in memory) avoids format migrations later."
+
+how = """
+Step-by-step implementation plan:
+
+1. Add dependencies to crates/jobchain-core/Cargo.toml via workspace deps:
+   - ed25519-dalek = { version = "2", features = ["rand_core", "pem"] }
+   - rand = "0.8" (provides OsRng for key generation)
+   - thiserror = "2" (for signing error types)
+   - zeroize = "1" (secret key memory hygiene — ed25519-dalek already uses it, but pin it explicitly)
+
+2. Create crates/jobchain-core/src/signing.rs and declare `pub mod signing;` in lib.rs.
+
+3. Define a SigningError enum using thiserror:
+   - KeyGeneration(String) — OsRng or dalek failure
+   - Io(#[from] std::io::Error) — file read/write
+   - InvalidKey(String) — deserialization/decode failure
+   - Signing(String) — sign operation failure
+   Use #[non_exhaustive] so variants can be added without breaking downstream.
+
+4. Define a Keypair struct wrapping ed25519_dalek::SigningKey (private field).
+   Implement:
+   - Keypair::generate() -> Result<Self, SigningError>
+     Uses OsRng to generate a fresh SigningKey.
+   - Keypair::public_key_bytes() -> [u8; 32]
+     Returns the raw 32-byte public key (what goes into did.json and proof.verificationMethod).
+   - Keypair::public_key_multibase() -> String
+     Returns the public key as a multibase-encoded string (z-base58btc prefix) for use in did:web documents per W3C DID spec.
+
+5. Implement file serialization:
+   - Keypair::save(&self, path: &Path) -> Result<(), SigningError>
+     Writes the 32-byte secret key seed to a file with restrictive permissions (0o600).
+     Format: raw 32-byte seed file (simplest, no PEM complexity — dalek can reconstruct from seed).
+     Set file permissions before writing to avoid race conditions.
+   - Keypair::load(path: &Path) -> Result<Self, SigningError>
+     Reads the 32-byte seed file, reconstructs the SigningKey.
+     Validates file is exactly 32 bytes, returns InvalidKey otherwise.
+
+6. Implement a standalone public key loader:
+   - pub fn load_public_key(path: &Path) -> Result<ed25519_dalek::VerifyingKey, SigningError>
+     Reads a 32-byte public key file (exported separately for did.json hosting).
+   - Keypair::save_public_key(&self, path: &Path) -> Result<(), SigningError>
+     Writes just the 32-byte public key to a file (for publishing in did.json).
+
+7. Write unit tests in signing.rs (#[cfg(test)] mod tests):
+   - test_generate_keypair: generate a keypair, assert public key is 32 bytes.
+   - test_roundtrip_save_load: generate, save to tempfile, load back, assert public keys match.
+   - test_load_invalid_file: write garbage bytes, assert InvalidKey error.
+   - test_public_key_export: generate, save public key, load it back with load_public_key, assert match.
+   - test_multibase_encoding: generate, call public_key_multibase(), assert starts with 'z' and decodes back to same bytes.
+
+8. Run `cargo test --workspace` and `cargo clippy --workspace` — must pass clean.
+"""
+
+backup = "If ed25519-dalek pem feature or version 2 causes issues, use version 2 without pem feature and stick with raw seed serialization only (which is the primary plan anyway). If rand 0.8 conflicts with dalek's rand_core version, use rand = '0.9' or pull OsRng directly from rand_core."
+
+[context]
+files = ["crates/jobchain-core/Cargo.toml", "crates/jobchain-core/src/lib.rs", "crates/jobchain-core/src/signing.rs", "Cargo.toml"]
+dependencies = ["ed25519-dalek 2.x", "rand 0.8", "thiserror 2.x", "zeroize 1.x"]

@@ -1,0 +1,98 @@
+what = "Verifiable employment credentials built on jobl resume data, signed with Ed25519 and packaged as W3C VCs"
+why = "Let people carry cryptographically signed proof of employment history that employers can issue and anyone can verify — no central authority, no blockchain, just DNS-anchored signatures over structured resume data"
+
+[[steps]]
+order = 1
+name = "workspace-skeleton"
+summary = "Create Cargo workspace with three empty crates (jobchain-core, jobchain-cli, jobchain-verify) and wire up dependencies between them"
+depends_on = []
+
+[[steps]]
+order = 2
+name = "keypair-generation"
+summary = "Implement Ed25519 keypair generation and serialization in jobchain-core/src/signing.rs using ed25519-dalek — generate, load, save, and derive public key"
+depends_on = ["workspace-skeleton"]
+
+[[steps]]
+order = 3
+name = "did-web-document"
+summary = "Implement did:web DID document generation in jobchain-core/src/did.rs — given a domain and public key, produce a JSON DID document with an Ed25519VerificationMethod"
+depends_on = ["keypair-generation"]
+
+[[steps]]
+order = 4
+name = "credential-structure"
+summary = "Define the W3C VC JSON subset types in jobchain-core/src/credential.rs — VerifiableCredential struct wrapping a jobl Experience as credentialSubject, with issuer, issuanceDate, and proof fields"
+depends_on = ["workspace-skeleton"]
+
+[[steps]]
+order = 5
+name = "credential-signing"
+summary = "Implement credential issuance: serialize credential to canonical JSON (sorted keys, no whitespace), sign with Ed25519, attach Ed25519Signature2020 proof block"
+depends_on = ["keypair-generation", "credential-structure"]
+
+[[steps]]
+order = 6
+name = "signature-verification"
+summary = "Implement signature verification in jobchain-verify — extract proof, reconstruct signing input, verify Ed25519 signature against issuer's public key"
+depends_on = ["credential-signing"]
+
+[[steps]]
+order = 7
+name = "did-web-resolution"
+summary = "Implement did:web resolution in jobchain-core/src/did.rs — parse a did:web URI, fetch the DID document over HTTPS, extract the verification key"
+depends_on = ["did-web-document", "signature-verification"]
+
+[[steps]]
+order = 8
+name = "amendment-chain"
+summary = "Implement amendment model in jobchain-core/src/amendment.rs — content-hash linking to previous credential, signed amendment documents forming a verifiable linked list"
+depends_on = ["credential-signing"]
+
+[[steps]]
+order = 9
+name = "adapter-trait"
+summary = "Define the adapter trait in jobchain-core/src/adapter.rs — on_hire, on_title_change, on_departure methods that return credential-ready data, no concrete implementations yet"
+depends_on = ["credential-structure"]
+
+[[steps]]
+order = 10
+name = "cli-init"
+summary = "Implement 'jobchain init' command — generate keypair, write keys to ~/.jobchain/, scaffold did:web document to stdout or a file"
+depends_on = ["keypair-generation", "did-web-document"]
+
+[[steps]]
+order = 11
+name = "cli-issue"
+summary = "Implement 'jobchain issue' command — read a jobl experience entry (from file or stdin), sign it into a VC, output the signed credential JSON"
+depends_on = ["credential-signing", "cli-init"]
+
+[[steps]]
+order = 12
+name = "cli-verify"
+summary = "Implement 'jobchain verify' command — read a signed credential, resolve issuer DID, verify signature, print result"
+depends_on = ["did-web-resolution", "signature-verification"]
+
+[[steps]]
+order = 13
+name = "cli-amend"
+summary = "Implement 'jobchain amend' command — take an existing credential and a patch, produce a signed amendment linked to the original"
+depends_on = ["amendment-chain", "cli-issue"]
+
+[[steps]]
+order = 14
+name = "cli-wallet"
+summary = "Implement 'jobchain wallet' command — static-site generator that takes a collection of signed credentials and produces an HTML folder with inline WASM verification"
+depends_on = ["cli-verify"]
+
+[[steps]]
+order = 15
+name = "verify-wasm-target"
+summary = "Add wasm32-unknown-unknown build support to jobchain-verify so the wallet's inline verifier compiles to a small WASM blob"
+depends_on = ["signature-verification", "cli-wallet"]
+
+[[steps]]
+order = 16
+name = "end-to-end-test"
+summary = "Integration test covering the full flow: init keypair, issue credential from jobl data, amend it, verify both original and amendment, generate wallet"
+depends_on = ["cli-wallet", "cli-amend"]
