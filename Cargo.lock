@@ -511,9 +511,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "bs58",
+ "chrono",
  "clap",
  "dirs",
+ "ed25519-dalek",
  "jobchain-core",
+ "jobl",
  "predicates",
  "serde_json",
  "tempfile",

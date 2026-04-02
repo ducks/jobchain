@@ -7,3 +7,4 @@ Written `11-cli-issue.toml`. The spec covers:
 - **Flags**: `--domain` (required), `--input`, `--date`, `--output`, `--key-dir`
 - **8 integration tests** covering file input, stdin pipe, custom/default date, output-to-file, missing keypair, invalid JSON, and a full sign-then-verify roundtrip
 - **Backup**: Local input struct fallback, atty fallback, inline signing fallback
+outcome = "success"
