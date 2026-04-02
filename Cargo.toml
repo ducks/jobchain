@@ -15,6 +15,10 @@ authors = ["Jake Goldsborough"]
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ed25519-dalek = "2"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+zeroize = "1"
+bs58 = "0.5"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
+jobl = "20251215"
