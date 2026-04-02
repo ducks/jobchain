@@ -57,7 +57,7 @@ pub struct VerifiableCredential {
 }
 
 /// Recursively sort all object keys in a `serde_json::Value` using `BTreeMap`.
-pub(crate) fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+pub fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
             let sorted: BTreeMap<String, serde_json::Value> = map
