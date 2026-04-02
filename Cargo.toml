@@ -22,4 +22,8 @@ bs58 = "0.5"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
+anyhow = "1"
+assert_cmd = "2"
+predicates = "3"
 jobl = "20251215"
