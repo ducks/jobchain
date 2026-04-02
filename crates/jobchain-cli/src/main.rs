@@ -19,6 +19,8 @@ enum Commands {
     Amend(commands::amend::AmendArgs),
     /// Verify a signed Verifiable Credential
     Verify(commands::verify::VerifyArgs),
+    /// Build and manage a static credential wallet site
+    Wallet(commands::wallet::WalletArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -29,5 +31,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Issue(args) => commands::issue::run(args),
         Commands::Amend(args) => commands::amend::run(args),
         Commands::Verify(args) => commands::verify::run(args),
+        Commands::Wallet(args) => commands::wallet::run(args),
     }
 }

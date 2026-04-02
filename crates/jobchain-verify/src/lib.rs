@@ -1,5 +1,8 @@
 //! Signature and credential verification for jobchain.
 
+#[cfg(feature = "wasm")]
+mod wasm;
+
 pub use jobchain_core::amendment::Amendment;
 pub use jobchain_core::credential::{CredentialSubject, Proof, VerifiableCredential};
 

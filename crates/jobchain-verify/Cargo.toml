@@ -6,12 +6,20 @@ license.workspace = true
 authors.workspace = true
 description = "Signature and credential verification for jobchain"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+
 [dependencies]
-jobchain-core = { path = "../jobchain-core" }
+jobchain-core = { path = "../jobchain-core", default-features = false }
 ed25519-dalek = { workspace = true }
 bs58 = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
 
 [dev-dependencies]
 jobl = { workspace = true }

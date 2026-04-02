@@ -9,3 +9,4 @@ Written to `.finna/specs/14-cli-wallet.toml`. The spec covers:
 - **Graceful degradation** — if WASM isn't built, generates the site without verify buttons and prints a warning
 - **11 integration tests** covering basic build, amendments, resume, empty dirs, force overwrite, JSON structure, base URLs, HTML content, WASM absence, and full end-to-end roundtrip
 - **Backup plan** — ship without WASM first if toolchain issues arise; swap to askama if inline templates get unwieldy; use wasm-opt if binary is too large
+outcome = "success"
