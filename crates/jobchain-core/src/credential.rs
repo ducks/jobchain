@@ -1,4 +1,9 @@
+use std::collections::BTreeMap;
+
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+
+use crate::signing::{Keypair, SigningError};
 
 /// Ed25519Signature2020 proof block for a Verifiable Credential.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +79,79 @@ impl VerifiableCredential {
         }
         serde_json::to_vec(&value)
     }
+}
+
+/// Errors that can occur during credential operations.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CredentialError {
+    #[error("serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("signing failed: {0}")]
+    Signing(#[from] SigningError),
+}
+
+/// Recursively sort all object keys for deterministic JSON canonicalization.
+fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), canonicalize(v)))
+                .collect();
+            serde_json::to_value(sorted).unwrap()
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(canonicalize).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+impl VerifiableCredential {
+    /// Sign this credential with the given keypair and verification method.
+    ///
+    /// Produces a canonical JSON payload (sorted keys, no whitespace),
+    /// signs it, and attaches an Ed25519Signature2020 proof block.
+    pub fn sign(
+        &mut self,
+        keypair: &Keypair,
+        verification_method: &str,
+    ) -> Result<(), CredentialError> {
+        let mut value = serde_json::to_value(&*self)?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("proof");
+        }
+        let canonical = canonicalize(&value);
+        let payload = serde_json::to_vec(&canonical)?;
+
+        let signature = keypair.sign(&payload);
+        let proof_value = format!("z{}", bs58::encode(&signature).into_string());
+        let created = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        self.proof = Some(Proof {
+            r#type: "Ed25519Signature2020".to_string(),
+            verification_method: verification_method.to_string(),
+            proof_value,
+            created,
+        });
+
+        Ok(())
+    }
+}
+
+/// Create and sign a credential in one step.
+pub fn issue_credential(
+    issuer: String,
+    subject: jobl::ExperienceItem,
+    keypair: &Keypair,
+    verification_method: &str,
+) -> Result<VerifiableCredential, CredentialError> {
+    let issuance_date = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut vc = VerifiableCredential::new(issuer, issuance_date, subject);
+    vc.sign(keypair, verification_method)?;
+    Ok(vc)
 }
 
 #[cfg(test)]
@@ -207,6 +285,168 @@ mod tests {
             serde_json::from_slice(&payload).unwrap();
 
         assert!(!value.as_object().unwrap().contains_key("proof"));
+    }
+
+    #[test]
+    fn test_canonicalize_sorts_keys() {
+        let vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        let value = serde_json::to_value(&vc).unwrap();
+        let canonical = canonicalize(&value);
+        // Keys should be alphabetically sorted
+        let obj = canonical.as_object().unwrap();
+        let keys: Vec<&String> = obj.keys().collect();
+        let mut sorted_keys = keys.clone();
+        sorted_keys.sort();
+        assert_eq!(keys, sorted_keys);
+    }
+
+    #[test]
+    fn test_canonicalize_no_whitespace() {
+        let vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        let value = serde_json::to_value(&vc).unwrap();
+        let canonical = canonicalize(&value);
+        let json = serde_json::to_vec(&canonical).unwrap();
+        let json_str = String::from_utf8(json).unwrap();
+        // No pretty-printing newlines
+        assert!(!json_str.contains('\n'));
+    }
+
+    #[test]
+    fn test_canonicalize_determinism() {
+        let vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        let value = serde_json::to_value(&vc).unwrap();
+        let c1 = serde_json::to_vec(&canonicalize(&value)).unwrap();
+        let c2 = serde_json::to_vec(&canonicalize(&value)).unwrap();
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn test_sign_attaches_proof() {
+        use crate::signing::Keypair;
+
+        let kp = Keypair::generate().unwrap();
+        let mut vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        vc.sign(&kp, "did:web:example.com#key-1").unwrap();
+
+        let proof = vc.proof.as_ref().unwrap();
+        assert_eq!(proof.r#type, "Ed25519Signature2020");
+        assert_eq!(proof.verification_method, "did:web:example.com#key-1");
+    }
+
+    #[test]
+    fn test_proof_multibase_encoding() {
+        use crate::signing::Keypair;
+
+        let kp = Keypair::generate().unwrap();
+        let mut vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        vc.sign(&kp, "did:web:example.com#key-1").unwrap();
+
+        let proof = vc.proof.as_ref().unwrap();
+        assert!(proof.proof_value.starts_with('z'));
+        let decoded = bs58::decode(&proof.proof_value[1..]).into_vec().unwrap();
+        assert_eq!(decoded.len(), 64);
+    }
+
+    #[test]
+    fn test_proof_timestamp_is_iso8601() {
+        use crate::signing::Keypair;
+
+        let kp = Keypair::generate().unwrap();
+        let mut vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        vc.sign(&kp, "did:web:example.com#key-1").unwrap();
+
+        let proof = vc.proof.as_ref().unwrap();
+        // Should end with Z and contain T
+        assert!(proof.created.ends_with('Z'));
+        assert!(proof.created.contains('T'));
+    }
+
+    #[test]
+    fn test_sign_verify_roundtrip() {
+        use crate::signing::Keypair;
+
+        let kp = Keypair::generate().unwrap();
+        let mut vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        vc.sign(&kp, "did:web:example.com#key-1").unwrap();
+
+        // Re-derive the payload and verify
+        let payload = vc.signing_payload().unwrap();
+        let canonical = canonicalize(&serde_json::from_slice::<serde_json::Value>(&payload).unwrap());
+        let canonical_bytes = serde_json::to_vec(&canonical).unwrap();
+
+        let proof = vc.proof.as_ref().unwrap();
+        let sig = bs58::decode(&proof.proof_value[1..]).into_vec().unwrap();
+        kp.verify(&canonical_bytes, &sig).unwrap();
+    }
+
+    #[test]
+    fn test_issue_credential_convenience() {
+        use crate::signing::Keypair;
+
+        let kp = Keypair::generate().unwrap();
+        let vc = issue_credential(
+            "did:web:example.com".to_string(),
+            sample_experience(),
+            &kp,
+            "did:web:example.com#key-1",
+        )
+        .unwrap();
+
+        assert!(vc.proof.is_some());
+        assert_eq!(vc.issuer, "did:web:example.com");
+    }
+
+    #[test]
+    fn test_tamper_detection() {
+        use crate::signing::Keypair;
+
+        let kp = Keypair::generate().unwrap();
+        let mut vc = VerifiableCredential::new(
+            "did:web:example.com".to_string(),
+            "2025-06-01T00:00:00Z".to_string(),
+            sample_experience(),
+        );
+        vc.sign(&kp, "did:web:example.com#key-1").unwrap();
+
+        // Tamper with the credential
+        vc.credential_subject.experience.title = "CEO".to_string();
+
+        // Re-derive payload and verify — should fail
+        let payload = vc.signing_payload().unwrap();
+        let canonical = canonicalize(&serde_json::from_slice::<serde_json::Value>(&payload).unwrap());
+        let canonical_bytes = serde_json::to_vec(&canonical).unwrap();
+
+        let proof = vc.proof.as_ref().unwrap();
+        let sig = bs58::decode(&proof.proof_value[1..]).into_vec().unwrap();
+        assert!(kp.verify(&canonical_bytes, &sig).is_err());
     }
 
     #[test]

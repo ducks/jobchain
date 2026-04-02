@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use rand::rngs::OsRng;
 
 /// Errors that can occur during signing operations.
@@ -105,6 +105,31 @@ impl Keypair {
     pub fn signing_key(&self) -> &SigningKey {
         &self.signing_key
     }
+
+    /// Sign a message and return the raw 64-byte signature.
+    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
+        let sig = self.signing_key.sign(message);
+        sig.to_bytes().to_vec()
+    }
+
+    /// Verify a signature against a message using this keypair's public key.
+    pub fn verify(
+        &self,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), SigningError> {
+        let sig_bytes: [u8; 64] = signature.try_into().map_err(|_| {
+            SigningError::InvalidKey(format!(
+                "expected 64-byte signature, got {} bytes",
+                signature.len()
+            ))
+        })?;
+        let sig = Signature::from_bytes(&sig_bytes);
+        self.signing_key
+            .verifying_key()
+            .verify_strict(message, &sig)
+            .map_err(|e| SigningError::Signing(e.to_string()))
+    }
 }
 
 /// Load a 32-byte public key file and return a VerifyingKey.
@@ -178,6 +203,32 @@ mod tests {
         assert_eq!(decoded[0], 0xed);
         assert_eq!(decoded[1], 0x01);
         assert_eq!(&decoded[2..], &kp.public_key_bytes());
+    }
+
+    #[test]
+    fn test_sign_and_verify() {
+        let kp = Keypair::generate().unwrap();
+        let message = b"hello world";
+        let signature = kp.sign(message);
+        assert_eq!(signature.len(), 64);
+        kp.verify(message, &signature).unwrap();
+    }
+
+    #[test]
+    fn test_verify_wrong_message() {
+        let kp = Keypair::generate().unwrap();
+        let signature = kp.sign(b"correct message");
+        let result = kp.verify(b"wrong message", &signature);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_wrong_key() {
+        let kp1 = Keypair::generate().unwrap();
+        let kp2 = Keypair::generate().unwrap();
+        let signature = kp1.sign(b"hello");
+        let result = kp2.verify(b"hello", &signature);
+        assert!(result.is_err());
     }
 
     #[cfg(unix)]

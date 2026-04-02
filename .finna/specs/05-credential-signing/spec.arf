@@ -8,3 +8,4 @@ The spec covers:
 4. **issue_credential()** convenience function — what the CLI `issue` command will call
 5. **10 tests** covering determinism, roundtrip sign-verify, tamper detection, multibase encoding, and ISO 8601 timestamps
 6. **Fallback** — manual timestamp formatting if chrono is too heavy, serde_json's native BTreeMap if explicit sorting is redundant
+outcome = "success"
