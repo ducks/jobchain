@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jobchain - Verifiable employment credentials</title>
+  <style>
+    @font-face {
+      font-family: 'Fifties';
+      src: url('fonts/VVDSFifties-ExpBold.woff2') format('woff2'),
+           url('fonts/VVDSFifties-ExpBold.woff') format('woff');
+      font-weight: bold;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: 'Atkinson Hyperlegible';
+      src: url('fonts/Atkinson-Hyperlegible-Regular-102a.woff2') format('woff2'),
+           url('fonts/Atkinson-Hyperlegible-Regular-102.woff') format('woff');
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: 'Atkinson Hyperlegible';
+      src: url('fonts/Atkinson-Hyperlegible-Bold-102a.woff2') format('woff2'),
+           url('fonts/Atkinson-Hyperlegible-Bold-102.woff') format('woff');
+      font-weight: 700;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    :root {
+      --bg-color: #fbf1c7;
+      --text-color: #3c3836;
+      --heading-color: #282828;
+      --heading-secondary: #504945;
+      --border-color: #d5c4a1;
+      --code-bg: #ebdbb2;
+      --link-color: #8f3f71;
+      --muted-color: #7c6f64;
+      --accent: #b57614;
+      --green: #79740e;
+    }
+
+    [data-theme="dark"] {
+      --bg-color: #282828;
+      --text-color: #ebdbb2;
+      --heading-color: #fbf1c7;
+      --heading-secondary: #d5c4a1;
+      --border-color: #504945;
+      --code-bg: #3c3836;
+      --link-color: #d3869b;
+      --muted-color: #928374;
+      --accent: #fabd2f;
+      --green: #b8bb26;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg-color: #282828;
+        --text-color: #ebdbb2;
+        --heading-color: #fbf1c7;
+        --heading-secondary: #d5c4a1;
+        --border-color: #504945;
+        --code-bg: #3c3836;
+        --link-color: #d3869b;
+        --muted-color: #928374;
+        --accent: #fabd2f;
+        --green: #b8bb26;
+      }
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Atkinson Hyperlegible', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.6;
+      color: var(--text-color);
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 2rem;
+      background: var(--bg-color);
+      transition: background-color 0.3s, color 0.3s;
+    }
+
+    h1, h2, h3 {
+      font-family: 'Fifties', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    h1 {
+      font-size: 3.5rem;
+      margin-bottom: 0.5rem;
+      color: var(--heading-color);
+    }
+
+    h2 {
+      font-size: 2.2rem;
+      margin-top: 2.5rem;
+      margin-bottom: 1rem;
+      color: var(--heading-color);
+      border-bottom: 2px solid var(--border-color);
+      padding-bottom: 0.5rem;
+    }
+
+    h3 {
+      font-size: 1.6rem;
+      margin-top: 1.5rem;
+      margin-bottom: 0.8rem;
+      color: var(--heading-secondary);
+    }
+
+    p {
+      margin-bottom: 1rem;
+    }
+
+    code {
+      background: var(--code-bg);
+      padding: 0.2rem 0.4rem;
+      border-radius: 3px;
+      font-family: "Monaco", "Courier New", monospace;
+      font-size: 0.9em;
+    }
+
+    pre {
+      background: var(--code-bg);
+      padding: 1rem;
+      border-radius: 5px;
+      overflow-x: auto;
+      margin-bottom: 1rem;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+    }
+
+    ul, ol {
+      margin-left: 2rem;
+      margin-bottom: 1rem;
+    }
+
+    ul li, ol li {
+      margin-bottom: 0.5rem;
+    }
+
+    strong {
+      color: var(--heading-color);
+      font-weight: 600;
+    }
+
+    a {
+      color: var(--link-color);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border-color);
+      color: var(--muted-color);
+      font-size: 0.9rem;
+    }
+
+    .theme-toggle {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      padding: 0.5rem 1rem;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      color: var(--text-color);
+      transition: all 0.3s;
+    }
+
+    nav {
+      margin-bottom: 2rem;
+    }
+
+    nav a {
+      margin-right: 1.5rem;
+      font-family: "Fifties";
+      font-size: 2rem;
+      text-transform: uppercase;
+    }
+
+    blockquote {
+      background: var(--code-bg);
+      border-left: 10px solid var(--link-color);
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .flow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      margin: 1.5rem 0;
+      flex-wrap: wrap;
+    }
+
+    .flow-step {
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      padding: 0.8rem 1.2rem;
+      text-align: center;
+      font-size: 0.9rem;
+    }
+
+    .flow-step strong {
+      display: block;
+      font-family: 'Fifties';
+      text-transform: uppercase;
+      font-size: 1rem;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.2rem;
+    }
+
+    .flow-arrow {
+      color: var(--muted-color);
+      font-size: 1.5rem;
+    }
+
+    .not-list {
+      list-style: none;
+      margin-left: 0;
+    }
+
+    .not-list li::before {
+      content: "- ";
+      color: var(--muted-color);
+    }
+
+    .highlight {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .valid {
+      color: var(--green);
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" id="themeToggle">Toggle Theme</button>
+
+  <header>
+    <h1>Jobchain</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="https://github.com/ducks/jobchain">GitHub</a>
+      <a href="https://jobl.dev">JOBL</a>
+    </nav>
+  </header>
+
+  <main>
+    <blockquote>
+      Verifiable employment credentials. Signed by your employer, verified by anyone, owned by you.
+    </blockquote>
+
+    <section>
+      <h2>The Problem</h2>
+      <p>Employment verification is stuck in the dark ages. You write a PDF resume, an ATS shreds it back to text, and a background check company calls your old employer to confirm dates. Nobody can verify your actual work without a phone call.</p>
+      <p>Jobchain fixes this with <strong>cryptographically signed credentials</strong>. Your employer signs a structured document saying you worked there. Anyone can verify the signature. No phone calls, no PDFs, no trust-me-bro.</p>
+    </section>
+
+    <section>
+      <h2>How It Works</h2>
+
+      <div class="flow">
+        <div class="flow-step">
+          <strong>Employer</strong>
+          Signs a credential
+        </div>
+        <span class="flow-arrow">&rarr;</span>
+        <div class="flow-step">
+          <strong>Employee</strong>
+          Hosts it anywhere
+        </div>
+        <span class="flow-arrow">&rarr;</span>
+        <div class="flow-step">
+          <strong>Verifier</strong>
+          Checks the signature
+        </div>
+      </div>
+
+      <h3>1. Employer Sets Up Identity</h3>
+      <pre><code>$ jobchain init --org "Acme Corp" --domain acme.com
+Initialized jobchain identity for Acme Corp
+  DID: did:web:acme.com
+  Next: host did.json at https://acme.com/.well-known/did.json</code></pre>
+      <p>This generates a keypair and a <a href="https://www.w3.org/TR/did-core/">DID document</a>. The public key lives at a well-known URL on the company's domain. That's the trust anchor &mdash; if you control the domain, you control the identity.</p>
+
+      <h3>2. Employer Issues a Credential</h3>
+      <pre><code>$ jobchain issue --domain acme.com \
+    --employee "Jane Developer" \
+    --title "Senior Engineer" \
+    --company "Acme Corp" \
+    --start 2022-06
+
+{
+  "@context": ["https://www.w3.org/2018/credentials/v1"],
+  "type": ["VerifiableCredential", "EmploymentCredential"],
+  "issuer": "did:web:acme.com",
+  "credentialSubject": {
+    "type": "EmploymentRecord",
+    "title": "Senior Engineer",
+    "company": "Acme Corp",
+    "start": "2022-06"
+  },
+  "proof": {
+    "type": "Ed25519Signature2020",
+    "proofValue": "z4jH8n..."
+  }
+}</code></pre>
+      <p>The output is a <a href="https://www.w3.org/TR/vc-data-model/">W3C Verifiable Credential</a> &mdash; a JSON document signed with Ed25519. Hand the <code>.vc.json</code> file to the employee.</p>
+
+      <h3>3. Anyone Can Verify</h3>
+      <pre><code>$ jobchain verify --input jane-acme.vc.json
+
+<span class="valid">VALID</span> &mdash; credential signature verified
+  Issuer:  did:web:acme.com
+  Subject: Senior Engineer at Acme Corp
+  Issued:  2024-06-15</code></pre>
+      <p>Verification fetches the public key from <code>acme.com/.well-known/did.json</code> and checks the signature. No account needed, no API key, no phone call. Just math.</p>
+    </section>
+
+    <section>
+      <h2>Your Wallet Is a Website</h2>
+      <p>A "wallet" is just a folder of signed <code>.vc.json</code> files hosted as a static site. GitHub Pages, Netlify, your own server &mdash; anywhere.</p>
+      <pre><code>$ jobchain wallet build --dir ./credentials --out ./site</code></pre>
+      <p>This generates an HTML site with your credentials and a machine-readable <code>index.json</code> manifest. Hiring managers see a clean page. ATS systems consume the structured JSON.</p>
+    </section>
+
+    <section>
+      <h2>What This Is Not</h2>
+      <ul class="not-list">
+        <li>Not a blockchain. Trust comes from DNS and public key cryptography, same as HTTPS.</li>
+        <li>Not a platform. There's no account to create, no service to depend on.</li>
+        <li>Not self-attested. Only the employer's private key can produce a valid signature.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Built On Standards</h2>
+      <ul>
+        <li><a href="https://www.w3.org/TR/vc-data-model/">W3C Verifiable Credentials 1.1</a> &mdash; credential format</li>
+        <li><a href="https://w3c-ccg.github.io/did-method-web/">did:web</a> &mdash; issuer identity via DNS</li>
+        <li><a href="https://w3c-ccg.github.io/di-eddsa-2020/">Ed25519Signature2020</a> &mdash; fast, small signatures</li>
+        <li><a href="https://jobl.dev">JOBL</a> &mdash; structured resume format (companion project)</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Install</h2>
+      <pre><code>cargo install jobchain</code></pre>
+      <p>Or build from source:</p>
+      <pre><code>git clone https://github.com/ducks/jobchain
+cd jobchain
+cargo build --release</code></pre>
+    </section>
+  </main>
+
+  <footer>
+    <p>Jobchain by <a href="https://jakegoldsborough.com">Jake Goldsborough</a>. MIT licensed. <a href="https://github.com/ducks/jobchain">Source on GitHub.</a></p>
+  </footer>
+
+  <script>
+    const themeToggle = document.getElementById('themeToggle');
+    const html = document.documentElement;
+
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme) {
+      html.setAttribute('data-theme', savedTheme);
+    }
+
+    themeToggle.addEventListener('click', () => {
+      const currentTheme = html.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+    });
+  </script>
+</body>
+</html>
