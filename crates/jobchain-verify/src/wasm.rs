@@ -58,7 +58,7 @@ pub fn decode_multibase_key_hex(multibase: &str) -> JsValue {
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("hex string must have even length".into());
     }
     (0..hex.len())
